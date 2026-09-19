@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>小爱 B 站闹钟</title>
+  <style>
+    :root { font-family: "Microsoft YaHei", "Segoe UI", sans-serif; color:#1d2939; background:#f4f7fb; }
+    * { box-sizing:border-box; }
+    body { margin:0; }
+    main { max-width:980px; margin:36px auto; padding:0 22px 50px; }
+    header { display:flex; justify-content:space-between; align-items:center; gap:20px; margin-bottom:25px; }
+    h1 { font-size:30px; margin:0 0 6px; letter-spacing:.02em; }
+    h2 { font-size:18px; margin:0 0 20px; }
+    p { margin:0; color:#667085; line-height:1.65; }
+    .badge { background:#e8f2ff; color:#1764bb; padding:8px 12px; border-radius:100px; font-size:13px; white-space:nowrap; }
+    .layout { display:grid; grid-template-columns:minmax(0,1.55fr) minmax(270px,1fr); gap:18px; }
+    .card { background:white; border:1px solid #e5eaf0; border-radius:18px; padding:24px; box-shadow:0 8px 30px #1f3b5a0a; margin-bottom:18px; }
+    label { display:block; font-size:14px; font-weight:600; margin:0 0 8px; }
+    input, select { width:100%; border:1px solid #ced7e3; border-radius:10px; padding:11px 12px; font:inherit; color:#1d2939; background:#fff; }
+    input:focus, select:focus { outline:2px solid #90c2ff; border-color:#3989e4; }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+    .field { margin-bottom:18px; }
+    .help { font-size:12px; color:#7d8998; margin-top:6px; }
+    .days { display:flex; flex-wrap:wrap; gap:8px; }
+    .day { display:flex; align-items:center; gap:6px; padding:8px 10px; background:#f5f8fc; border:1px solid #e3e9f1; border-radius:9px; font-size:13px; }
+    .day input { width:auto; margin:0; }
+    .date-add { display:flex; gap:8px; }
+    .date-add input { flex:1; }
+    .chips { display:flex; gap:7px; flex-wrap:wrap; min-height:26px; margin-top:10px; }
+    .chip { border:1px solid #bcd6f2; color:#1764bb; background:#eef6ff; border-radius:20px; padding:5px 9px; font:inherit; font-size:12px; cursor:pointer; }
+    .switchline { display:flex; align-items:center; gap:10px; font-size:15px; font-weight:600; }
+    .switchline input { width:19px; height:19px; }
+    button { border:0; background:#e9eef5; color:#24354b; border-radius:10px; padding:11px 15px; font:inherit; cursor:pointer; white-space:nowrap; }
+    button:hover { filter:brightness(.96); }
+    button.primary { background:#176bd1; color:white; font-weight:700; }
+    button.danger { color:#af3440; background:#fff0f1; }
+    .actions { display:flex; flex-wrap:wrap; gap:8px; }
+    .status { display:grid; gap:10px; }
+    .status-item { border-top:1px solid #edf0f4; padding-top:10px; }
+    .status-item strong { display:block; font-size:13px; color:#344054; margin-bottom:3px; }
+    .status-item span { display:block; font-size:13px; color:#667085; overflow-wrap:anywhere; }
+    .toast { margin-top:14px; min-height:24px; font-size:13px; color:#1764bb; }
+    .hidden { display:none; }
+    @media(max-width:760px) { main{margin-top:20px;padding:0 15px 30px} .layout{grid-template-columns:1fr} header{align-items:flex-start} h1{font-size:25px} }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div><h1>小爱 B 站闹钟</h1><p>在常开电脑上管理小爱音箱的定时播放。</p></div>
+    <span class="badge" id="badge">正在连接</span>
+  </header>
+  <div class="layout">
+    <div>
+      <section class="card">
+        <h2>播放计划</h2>
+        <div class="field"><label class="switchline"><input id="enabled" type="checkbox">启用闹钟</label></div>
+        <div class="row">
+          <div class="field"><label for="play_time">播放时间 · 北京时间</label><input id="play_time" type="time" required></div>
+          <div class="field"><label for="schedule_mode">播放日期</label><select id="schedule_mode">
+            <option value="workdays">中国法定工作日（含调休）</option><option value="daily">每天</option>
+            <option value="weekdays">指定星期</option><option value="dates">仅指定日期</option>
+          </select></div>
+        </div>
+        <div id="weekdays_box" class="field hidden"><label>选择星期</label><div class="days" id="weekdays"></div></div>
+        <div class="row">
+          <div class="field"><label for="include_date">额外播放日期</label><div class="date-add"><input id="include_date" type="date"><button id="add_include">添加</button></div><div class="chips" id="include_dates"></div></div>
+          <div class="field"><label for="exclude_date">跳过日期</label><div class="date-add"><input id="exclude_date" type="date"><button id="add_exclude">添加</button></div><div class="chips" id="exclude_dates"></div></div>
+        </div>
+        <p class="help">点击已添加的日期即可移除。手动添加的播放日期优先于星期规则；跳过日期优先级最高。</p>
+      </section>
+      <section class="card">
+        <h2>播放内容</h2>
+        <div class="field"><label for="source_type">内容来源</label><select id="source_type"><option value="latest">B 站账号最新投稿</option><option value="video">指定 B 站视频</option><option value="local">本地音频文件</option></select></div>
+        <div id="latest_box">
+          <div class="field"><label for="source_url">账号投稿页</label><input id="source_url" type="url" placeholder="https://space.bilibili.com/UP主UID/video"></div>
+          <div class="field"><label for="title_pattern">标题筛选（可选）</label><input id="title_pattern" placeholder=".*"><p class="help">留空或 .* 表示该账号最新投稿；填写“每日CS”可只选标题包含它的视频。</p></div>
+        </div>
+        <div id="video_box" class="hidden field"><label for="video_url">视频链接</label><input id="video_url" type="url" placeholder="https://www.bilibili.com/video/BV..."></div>
+        <div id="local_box" class="hidden field"><label for="local_file">上传音频</label><input id="local_file" type="file" accept="audio/*,.mp3,.m4a,.wav,.ogg"><p class="help">上传后会转换成适合 L05C 播放的 MP3。</p><button id="upload" type="button" style="margin-top:9px">上传并设为播放内容</button></div>
+        <div class="actions"><button id="save" class="primary">保存设置</button><button id="prepare">现在更新内容</button></div>
+        <div class="toast" id="toast"></div>
+      </section>
+    </div>
+    <aside>
+      <section class="card">
+        <h2>播放控制</h2>
+        <div class="actions"><button id="play" class="primary">试听当前内容</button><button id="stop" class="danger">停止播放</button></div>
+        <p class="help" style="margin-top:14px">试听会立即让音箱播放，与设定日期和时间无关。</p>
+      </section>
+      <section class="card">
+        <h2>运行状态</h2>
+        <div class="status">
+          <div class="status-item"><strong>已准备的内容</strong><span id="episode">读取中…</span></div>
+          <div class="status-item"><strong>上次更新</strong><span id="prepare_status">—</span></div>
+          <div class="status-item"><strong>上次播放</strong><span id="play_status">—</span></div>
+        </div>
+      </section>
+    </aside>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let includeDates=[], excludeDates=[];
+const days=['周一','周二','周三','周四','周五','周六','周日'];
+$('weekdays').innerHTML=days.map((d,i)=>`<label class="day"><input type="checkbox" value="${i}">${d}</label>`).join('');
+function showFields(){ $('weekdays_box').classList.toggle('hidden',$('schedule_mode').value!=='weekdays'); $('latest_box').classList.toggle('hidden',$('source_type').value!=='latest'); $('video_box').classList.toggle('hidden',$('source_type').value!=='video'); $('local_box').classList.toggle('hidden',$('source_type').value!=='local'); }
+function chips(id,dates){ $(id).innerHTML=''; dates.sort().forEach(date=>{const b=document.createElement('button'); b.className='chip'; b.textContent=date+' ×'; b.onclick=()=>{dates.splice(dates.indexOf(date),1);chips(id,dates)}; $(id).appendChild(b)}); }
+function say(message, error=false){ $('toast').textContent=message; $('toast').style.color=error?'#bb3344':'#1764bb'; }
+async function api(path,method='GET',body){const r=await fetch(path,{method,headers:body&&!(body instanceof Blob)?{'Content-Type':'application/json'}:{},body:body instanceof Blob?body:body?JSON.stringify(body):undefined});const j=await r.json();if(!r.ok)throw Error(j.error||'操作失败');return j;}
+async function load(){const c=await api('/api/config'); $('enabled').checked=c.enabled!==false; $('play_time').value=c.play_time||'07:30'; $('schedule_mode').value=c.schedule_mode||'workdays'; $('source_type').value=c.source_type||'latest'; $('source_url').value=c.source_url||''; $('title_pattern').value=c.title_pattern||''; $('video_url').value=c.video_url||''; includeDates=c.include_dates||[];excludeDates=c.exclude_dates||[];chips('include_dates',includeDates);chips('exclude_dates',excludeDates);document.querySelectorAll('#weekdays input').forEach(x=>x.checked=(c.weekdays||[]).includes(Number(x.value)));showFields();await refresh();}
+async function refresh(){try{const s=await api('/api/status');$('badge').textContent=s.busy?'正在处理':s.audio_ready?'服务正常':'等待音频';$('episode').textContent=s.episode?.title||'尚未准备';for(const kind of ['prepare','play']){const v=s[kind];$(kind+'_status').textContent=v?`${v.at} · ${v.result==='ok'?'成功':'失败'} · ${v.message}`:'尚未运行';}}catch(e){$('badge').textContent='连接失败';}}
+$('schedule_mode').onchange=showFields;$('source_type').onchange=showFields;
+for(const kind of ['include','exclude']){$('add_'+kind).onclick=()=>{const list=kind==='include'?includeDates:excludeDates;const input=$(kind+'_date');if(input.value&&!list.includes(input.value)){list.push(input.value);chips(kind+'_dates',list)}input.value='';};}
+$('save').onclick=async()=>{try{const config={enabled:$('enabled').checked,play_time:$('play_time').value,schedule_mode:$('schedule_mode').value,weekdays:[...document.querySelectorAll('#weekdays input:checked')].map(x=>Number(x.value)),include_dates:includeDates,exclude_dates:excludeDates,source_type:$('source_type').value,source_url:$('source_url').value.trim(),title_pattern:$('title_pattern').value.trim(),video_url:$('video_url').value.trim()};const result=await api('/api/config','POST',config);say(result.refreshing?'设置已保存，正在准备新内容。':'设置已保存。');}catch(e){say(e.message,true)}};
+$('prepare').onclick=async()=>{try{await api('/api/prepare','POST');say('正在更新内容，完成后会显示在右侧。')}catch(e){say(e.message,true)}};
+$('play').onclick=async()=>{try{await api('/api/play','POST');say('已向音箱发起试听。')}catch(e){say(e.message,true)}};
+$('stop').onclick=async()=>{try{await api('/api/stop','POST');say('已停止播放。')}catch(e){say(e.message,true)}};
+$('upload').onclick=async()=>{const f=$('local_file').files[0];if(!f){say('请先选择音频文件',true);return}try{const r=await fetch('/api/upload',{method:'POST',headers:{'X-Filename':encodeURIComponent(f.name)},body:f});const j=await r.json();if(!r.ok)throw Error(j.error||'上传失败');$('source_type').value='local';showFields();await $('save').onclick();say('音频已上传并设为播放内容。')}catch(e){say(e.message,true)}};
+load().catch(e=>say(e.message,true));setInterval(refresh,10000);
+</script>
+</body>
+</html>

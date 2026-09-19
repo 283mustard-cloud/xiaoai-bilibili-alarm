@@ -1,0 +1,4 @@
+chinesecalendar==1.11.0
+imageio-ffmpeg>=0.6,<1
+yt-dlp>=2026.1.1
+xiaoMusic==0.6.1

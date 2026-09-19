@@ -1,0 +1,15 @@
+{
+  "source_url": "https://space.bilibili.com/UP_UID/video",
+  "title_pattern": ".*",
+  "output_mp3": "C:/path/to/xiaomusic/music/B站闹钟最新一期.mp3",
+  "xiaomusic_url": "http://127.0.0.1:58090",
+  "device_id": "YOUR_DEVICE_ID",
+  "play_time": "07:30",
+  "enabled": true,
+  "schedule_mode": "workdays",
+  "weekdays": [0, 1, 2, 3, 4],
+  "include_dates": [],
+  "exclude_dates": [],
+  "source_type": "latest",
+  "video_url": ""
+}

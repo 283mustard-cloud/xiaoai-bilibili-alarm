@@ -1,0 +1,17 @@
+config.json
+xiaomusic-config.json
+conf/
+music/
+download/
+cache/
+tmp/
+logs/
+state.json
+runstate.json
+vendor/
+__pycache__/
+*.py[cod]
+*.mp3
+*.m4a
+*.part
+.venv/
