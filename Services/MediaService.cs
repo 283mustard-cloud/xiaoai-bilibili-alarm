@@ -48,7 +48,11 @@ public static partial class MediaService
         Directory.CreateDirectory(mediaRoot);
         var safeId = Regex.Replace(videoId, "[^a-zA-Z0-9_-]", "");
         var target = Path.Combine(mediaRoot, $"小爱闹钟-{alarm.Id[..8]}-{safeId}.mp3");
-        if (File.Exists(target) && new FileInfo(target).Length > 100_000) return (target, title);
+        if (File.Exists(target) && new FileInfo(target).Length > 100_000)
+        {
+            PruneOldFiles(mediaRoot, alarm.Id);
+            return (target, title);
+        }
         var outputTemplate = Path.Combine(mediaRoot, $".download-{alarm.Id}-%(id)s.%(ext)s");
         var downloadArgs = new List<string>(); downloadArgs.AddRange(prefix);
         downloadArgs.AddRange(["--no-playlist", "-x", "--audio-format", "mp3", "--audio-quality", "5"]);
@@ -59,7 +63,19 @@ public static partial class MediaService
         var downloaded = Directory.GetFiles(mediaRoot, $".download-{alarm.Id}-*.mp3").OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
         if (downloaded is null) throw new InvalidOperationException("下载完成但没有生成 MP3 文件");
         File.Move(downloaded, target, true);
+        PruneOldFiles(mediaRoot, alarm.Id);
         return (target, title);
+    }
+
+    private static void PruneOldFiles(string mediaRoot, string alarmId)
+    {
+        foreach (var file in Directory.GetFiles(mediaRoot, $"小爱闹钟-{alarmId[..8]}-*.mp3")
+                     .OrderByDescending(File.GetLastWriteTimeUtc).Skip(3))
+        {
+            try { File.Delete(file); }
+            catch (IOException ex) { Log.Error($"清理旧铃声失败：{file}", ex); }
+            catch (UnauthorizedAccessException ex) { Log.Error($"清理旧铃声失败：{file}", ex); }
+        }
     }
 
     private static (string File, bool ModuleMode) ResolveYtDlp(AppSettings settings)

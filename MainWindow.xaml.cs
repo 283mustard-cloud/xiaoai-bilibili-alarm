@@ -1,5 +1,6 @@
 using Microsoft.Win32;
 using System.Globalization;
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -71,7 +72,7 @@ public partial class MainWindow : Window
     {
         _editingId = isNew ? null : alarm.Id;
         EditorTitle.Text = isNew ? "新建闹钟" : "编辑闹钟";
-        NameBox.Text = alarm.Name; TimeBox.Text = alarm.Time; PrepareBox.Text = alarm.PrepareMinutes.ToString(); SnoozeBox.Text = alarm.SnoozeMinutes.ToString();
+        NameBox.Text = alarm.Name; TimeBox.Text = alarm.Time; PrepareBox.Text = alarm.PrepareMinutes.ToString(); SnoozeBox.Text = alarm.SnoozeMinutes.ToString(); VolumeBox.Text = alarm.Volume.ToString();
         RepeatBox.SelectedIndex = (int)alarm.Repeat; SoundBox.SelectedIndex = (int)alarm.Sound; SourceBox.Text = alarm.SourceUrl; FilterBox.Text = alarm.TitleFilter; LocalBox.Text = alarm.LocalFile;
         foreach (CheckBox box in WeekdayPanel.Children) box.IsChecked = alarm.Weekdays.Contains(Enum.Parse<DayOfWeek>((string)box.Tag));
         PreparedInfo.Text = string.IsNullOrWhiteSpace(alarm.PreparedTitle) ? "尚未准备铃声" : $"当前铃声：{alarm.PreparedTitle}\n更新时间：{alarm.PreparedAt:yyyy-MM-dd HH:mm}";
@@ -84,6 +85,7 @@ public partial class MainWindow : Window
         if (!TimeOnly.TryParseExact(TimeBox.Text.Trim(), "HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out _)) throw new InvalidOperationException("时间格式应为 HH:mm，例如 07:30");
         if (!int.TryParse(PrepareBox.Text, out var lead) || lead is < 0 or > 720) throw new InvalidOperationException("提前更新时间应为 0–720 分钟");
         if (!int.TryParse(SnoozeBox.Text, out var snooze) || snooze is < 1 or > 60) throw new InvalidOperationException("贪睡时间应为 1–60 分钟");
+        if (!int.TryParse(VolumeBox.Text, out var volume) || volume is < 1 or > 100) throw new InvalidOperationException("闹钟音量应为 1–100");
         var repeat = Enum.Parse<RepeatKind>((string)((ComboBoxItem)RepeatBox.SelectedItem).Tag);
         var sound = Enum.Parse<SoundKind>((string)((ComboBoxItem)SoundBox.SelectedItem).Tag);
         if (sound != SoundKind.LocalFile && string.IsNullOrWhiteSpace(SourceBox.Text)) throw new InvalidOperationException("请填写 B 站来源地址");
@@ -94,7 +96,7 @@ public partial class MainWindow : Window
             Id = previous?.Id ?? Guid.NewGuid().ToString("N"), Name = string.IsNullOrWhiteSpace(NameBox.Text) ? "闹钟" : NameBox.Text.Trim(), Enabled = previous?.Enabled ?? true,
             Time = TimeBox.Text.Trim(), Repeat = repeat, Weekdays = WeekdayPanel.Children.OfType<CheckBox>().Where(x => x.IsChecked == true).Select(x => Enum.Parse<DayOfWeek>((string)x.Tag)).ToList(),
             Sound = sound, SourceUrl = SourceBox.Text.Trim(), TitleFilter = string.IsNullOrWhiteSpace(FilterBox.Text) ? ".*" : FilterBox.Text.Trim(), LocalFile = LocalBox.Text,
-            PreparedFile = previous?.PreparedFile ?? "", PreparedTitle = previous?.PreparedTitle ?? "", PreparedAt = previous?.PreparedAt, PrepareMinutes = lead, SnoozeMinutes = snooze,
+            PreparedFile = previous?.PreparedFile ?? "", PreparedTitle = previous?.PreparedTitle ?? "", PreparedAt = previous?.PreparedAt, PrepareMinutes = lead, SnoozeMinutes = snooze, Volume = volume,
             LastFiredAt = previous?.LastFiredAt, LastResult = previous?.LastResult ?? "尚未运行"
         };
     }
@@ -166,6 +168,13 @@ public partial class MainWindow : Window
 
     private async void Stop_Click(object sender, RoutedEventArgs e) { try { await XiaoMusicService.StopAsync(_data.Settings); } catch (Exception ex) { MessageBox.Show(ex.Message, "停止失败"); } }
     private void Browse_Click(object sender, RoutedEventArgs e) { var d = new OpenFileDialog { Filter = "音频文件|*.mp3;*.m4a;*.wav;*.ogg;*.flac|所有文件|*.*" }; if (d.ShowDialog() == true) LocalBox.Text = d.FileName; }
+    private void OpenFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var alarm = _editingId is null ? null : _data.Alarms.FirstOrDefault(a => a.Id == _editingId);
+        var folder = alarm is not null && File.Exists(alarm.PreparedFile) ? Path.GetDirectoryName(alarm.PreparedFile) : (string.IsNullOrWhiteSpace(_data.Settings.MediaDirectory) ? AppPaths.Media : _data.Settings.MediaDirectory);
+        Directory.CreateDirectory(folder!);
+        Process.Start(new ProcessStartInfo("explorer.exe", folder!) { UseShellExecute = true });
+    }
     private void Back_Click(object sender, RoutedEventArgs e) { RenderList(); ShowPage(ListPage); }
     private void Repeat_Changed(object sender, SelectionChangedEventArgs e) => UpdateConditionalFields();
     private void Sound_Changed(object sender, SelectionChangedEventArgs e) => UpdateConditionalFields();

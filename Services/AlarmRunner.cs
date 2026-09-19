@@ -77,7 +77,7 @@ public static class AlarmRunner
         if (!File.Exists(file)) throw new FileNotFoundException("没有可播放的铃声文件");
         try
         {
-            await XiaoMusicService.PlayWithRetryAsync(settings, Path.GetFileNameWithoutExtension(file));
+            await XiaoMusicService.PlayWithRetryAsync(settings, Path.GetFileNameWithoutExtension(file), alarm.Volume);
             await DataStore.UpdateAlarmAsync(alarm.Id, a => { a.LastFiredAt = DateTimeOffset.Now; a.LastResult = "播放成功"; });
             Log.Info($"{alarm.Name} 已推送到小爱音箱");
         }

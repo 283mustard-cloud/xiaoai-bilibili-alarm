@@ -20,6 +20,7 @@ public sealed class AlarmModel
     public DateTimeOffset? PreparedAt { get; set; }
     public int PrepareMinutes { get; set; } = 30;
     public int SnoozeMinutes { get; set; } = 10;
+    public int Volume { get; set; } = 50;
     public DateTimeOffset? LastFiredAt { get; set; }
     public string LastResult { get; set; } = "尚未运行";
 }
