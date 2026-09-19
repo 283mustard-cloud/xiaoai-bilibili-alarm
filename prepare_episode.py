@@ -1,10 +1,12 @@
 """Prepare the chosen Bilibili audio for XiaoMusic."""
 
 import json
+import logging
 import os
 import re
 import subprocess
 import sys
+import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +15,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "vendor"))
 TZ = timezone(timedelta(hours=8))
+
+
+def write_json(path, value):
+    """Atomic write: never leave a half-written file for a reader."""
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(path)
 
 
 def ytdlp(*args):
@@ -29,19 +38,22 @@ def ytdlp(*args):
 
 
 def main(config=None):
+    log = logging.getLogger("alarm.prepare")
     config = config or json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
     source_type = config.get("source_type", "latest")
     if source_type == "local":
-        target = Path(config["output_mp3"])
+        target = Path(str(config.get("output_mp3") or ""))
         if not target.is_file():
             raise RuntimeError("No local audio has been uploaded")
         return
-    source = config["source_url"] if source_type == "latest" else config["video_url"]
+    source = config.get("source_url") if source_type == "latest" else config.get("video_url")
+    if not source:
+        raise RuntimeError(f"Missing address for source_type={source_type}")
     pattern = re.compile(config.get("title_pattern") or ".*", re.IGNORECASE)
-    music_dir = Path(config["output_mp3"]).expanduser().resolve().parent
+    music_dir = Path(str(config.get("output_mp3") or (ROOT / "music" / "alarm.mp3"))).expanduser().resolve().parent
     music_dir.mkdir(parents=True, exist_ok=True)
     state_path = ROOT / "state.json"
-    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+    started_at = time.monotonic()
 
     if source_type == "latest":
         listing = json.loads(ytdlp("--flat-playlist", "--playlist-end", "20", "-J", source))
@@ -105,28 +117,27 @@ def main(config=None):
     # Each episode gets its own filename; the speaker may keep the old file open.
     config_path = ROOT / "config.json"
     latest_config = json.loads(config_path.read_text(encoding="utf-8"))
-    active_source = latest_config["source_url"] if source_type == "latest" else latest_config["video_url"]
+    active_source = latest_config.get("source_url") if source_type == "latest" else latest_config.get("video_url")
     if latest_config.get("source_type", "latest") != source_type or active_source != source:
         raise RuntimeError("Content source changed while preparing; kept the previous selection")
-    url = latest_config["xiaomusic_url"].rstrip("/") + "/cmd"
+    url = str(latest_config.get("xiaomusic_url") or "").rstrip("/") + "/cmd"
     request = urllib.request.Request(url, data=json.dumps({
-        "did": latest_config["device_id"], "cmd": "刷新列表"
+        "did": latest_config.get("device_id"), "cmd": "刷新列表"
     }, ensure_ascii=False).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(request, timeout=20) as response:
         result = json.load(response)
     if result.get("ret") != "OK":
         raise RuntimeError(f"XiaoMusic could not refresh its library: {result}")
     latest_config["output_mp3"] = str(target)
-    config_tmp = config_path.with_suffix(".json.tmp")
-    config_tmp.write_text(json.dumps(latest_config, ensure_ascii=False, indent=2), encoding="utf-8")
-    config_tmp.replace(config_path)
-    state_path.write_text(json.dumps({
+    write_json(config_path, latest_config)
+    write_json(state_path, {
         "episode_id": episode_id,
         "title": episode.get("title"),
         "url": video_url,
         "source": source,
         "prepared_at": datetime.now(TZ).isoformat(),
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    })
+    log.info("Prepared %s in %.1fs", episode_id, time.monotonic() - started_at)
     print("Prepared:", episode.get("title"))
 
 

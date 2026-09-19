@@ -1,30 +1,44 @@
-"""Play the prepared episode on the selected XiaoMusic speaker."""
+"""Play the prepared episode on the selected XiaoMusic speaker.
+
+Run standalone it only plays inside the alarm minute and only on a day the
+schedule selects; the dashboard passes force=True once it has already decided
+that the alarm is due.
+"""
 
 import json
-import urllib.request
 import sys
-from datetime import datetime, timedelta, timezone
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "vendor"))
+sys.path.insert(0, str(ROOT))
+
+from schedule_rules import eligible_on, now, play_time_of  # noqa: E402
+
+
+class PlaybackSkipped(RuntimeError):
+    """Raised when the alarm is not due now; not a failure."""
+
+
 def main(config=None, force=False):
     config = config or json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
-    now = datetime.now(timezone(timedelta(hours=8)))
     if not force:
-        from chinese_calendar import is_workday
-        hour, minute = map(int, config.get("play_time", "07:30").split(":"))
-        if now.hour != hour or now.minute != minute:
-            raise RuntimeError("Outside the configured alarm minute")
-        if not is_workday(now.date()):
-            print("No playback: statutory day off", now.date())
-            return
-    target = Path(config["output_mp3"])
+        current = now()
+        hour, minute = play_time_of(config)
+        if current.hour != hour or current.minute != minute:
+            raise PlaybackSkipped("Outside the configured alarm minute")
+        if not eligible_on(current, config):
+            raise PlaybackSkipped(
+                f"No playback: {current.date().isoformat()} is not selected by schedule_mode="
+                f"{config.get('schedule_mode')}"
+            )
+    target = Path(str(config.get("output_mp3") or ""))
     if not target.is_file():
         raise RuntimeError("No prepared episode; keep the speaker's native alarm enabled")
-    url = config["xiaomusic_url"].rstrip("/") + "/playmusic"
+    url = str(config.get("xiaomusic_url") or "").rstrip("/") + "/playmusic"
     payload = json.dumps({
-        "did": config["device_id"],
+        "did": config.get("device_id"),
         "musicname": target.stem,
     }).encode("utf-8")
     request = urllib.request.Request(url, data=payload, headers={
@@ -40,6 +54,8 @@ def main(config=None, force=False):
 if __name__ == "__main__":
     try:
         main()
+    except PlaybackSkipped as exc:
+        print(str(exc))
     except Exception as exc:
         print(f"Playback failed: {exc}", file=sys.stderr)
         sys.exit(1)

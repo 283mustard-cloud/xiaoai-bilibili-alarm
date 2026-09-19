@@ -1,6 +1,13 @@
-"""Local alarm dashboard and scheduler. Open http://127.0.0.1:58100/."""
+"""Local alarm dashboard and scheduler. Open http://127.0.0.1:58100/.
+
+Timing rules live in schedule_rules.py. `decide()` is the whole scheduling
+policy as a pure function (no I/O, no clock, no state mutation) so it can be
+ticked over simulated times in tests; the loop and the HTTP server only carry
+out what it asks for.
+"""
 
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -8,29 +15,77 @@ import threading
 import time
 import urllib.request
 import uuid
+from logging.handlers import RotatingFileHandler
 from urllib.parse import unquote
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "vendor"))
-from chinese_calendar import is_workday
 
-from play_alarm import main as play_audio
-from prepare_episode import main as prepare_audio
+from schedule_rules import (  # noqa: E402  (needs the vendor path first)
+    CATCH_UP_MINUTES,
+    DEFAULT_PLAY_TIME,
+    PREPARE_RETRY_MINUTES,
+    TIME_PATTERN,
+    TZ,
+    next_schedule,
+    now,
+    previous_alarm,
+)
+
+from play_alarm import main as play_audio  # noqa: E402
+from prepare_episode import main as prepare_audio  # noqa: E402
 
 CONFIG_PATH = ROOT / "config.json"
 RUN_PATH = ROOT / "runstate.json"
-TZ = timezone(timedelta(hours=8))
+STATE_PATH = ROOT / "state.json"
+LOG_PATH = ROOT / "logs" / "alarm.log"
+
 LOCK = threading.RLock()
 BUSY = set()
+BUSY_EVENTS = {}
+PORT = 58100
+
+# How many prepared Bilibili episodes to keep on disk. Each episode is a new
+# file (the speaker may hold the old one open), so old ones have to be pruned.
+# Matched by the trailing BV id so any "<label>-BV<id>.mp3" naming works and
+# unrelated music files are never touched.
+KEEP_EPISODES = 3
+EPISODE_GLOB = "*-BV*.mp3"
+# Playback retries are spaced by this many minutes inside the catch-up window.
+PLAY_RETRY_MINUTES = 1
+# A first attempt fires almost immediately after the alarm minute, so the ring
+# is not delayed by the retry spacing.
+PLAY_FIRST_GRACE_SECONDS = 20
+# An alarm is "on time" for this long after its minute; later is a catch-up.
+ON_TIME_GRACE_SECONDS = 60
+# How long after a closed catch-up window a failed alarm is still reported as
+# missed (a failure at 07:30 should not still be announced at midnight).
+MISS_REPORT_HOURS = 2
+SCHEDULER_TICK_SECONDS = 5
+LOG = logging.getLogger("alarm")
+
+
+def setup_logging():
+    """Log to logs/alarm.log; without this a failed 07:30 leaves no trace."""
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(LOG_PATH, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    if not any(isinstance(h, RotatingFileHandler) for h in root.handlers):
+        root.addHandler(handler)
 
 
 def read_json(path, default):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
+        return default.copy()
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+        LOG.warning("Ignoring unreadable %s: %s", path.name, exc)
         return default.copy()
 
 
@@ -40,45 +95,174 @@ def write_json(path, value):
     temp.replace(path)
 
 
-def today():
-    return datetime.now(TZ)
+def record(kind, result, message):
+    with LOCK:
+        state = read_json(RUN_PATH, {})
+        state[kind] = {"at": now().isoformat(timespec="seconds"), "result": result,
+                       "message": str(message)[-500:]}
+        write_json(RUN_PATH, state)
 
 
-def eligible(day, config):
-    iso = day.date().isoformat()
-    if iso in config.get("exclude_dates", []):
+def parse_dt(value):
+    """Parse a runstate timestamp, always returning tz-aware Beijing time.
+
+    Comparisons against `now()` would otherwise raise on the naive datetimes
+    that datetime.fromisoformat() produces for a value without an offset.
+    """
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=TZ)
+    return parsed
+
+
+def occurred_at(state, kind, when, config):
+    """Was the alarm due at `when` actually carried out successfully?
+
+    Understands the current `last_<kind>_ok` marker as well as the older
+    `last_<kind>_day` plus `<kind>.result` pair, so a runstate written by a
+    previous version keeps reporting the truth instead of claiming a miss.
+    """
+    if when is None:
+        return None
+    current = f"{when.date().isoformat()}@{config.get('play_time')}"
+    if state.get(f"last_{kind}_ok") is not None:
+        return state.get(f"last_{kind}_ok") == current
+    legacy_day = state.get(f"last_{kind}_day")
+    if not isinstance(legacy_day, str):
         return False
-    if iso in config.get("include_dates", []):
-        return True
-    mode = config.get("schedule_mode", "workdays")
-    if mode == "workdays":
-        return is_workday(day.date())
-    if mode == "daily":
-        return True
-    if mode == "weekdays":
-        return day.weekday() in config.get("weekdays", [])
-    if mode == "dates":
+    entry = state.get(kind)
+    if not isinstance(entry, dict) or entry.get("result") != "ok":
         return False
-    raise ValueError("Unknown schedule mode")
+    day, _, time_text = legacy_day.partition("@")
+    # Older builds stored the configured time rather than the alarm time.
+    return day == when.date().isoformat() and (
+        not time_text or time_text in (config.get("play_time"), when.strftime("%H:%M")))
 
 
-def next_schedule(now, config):
-    """Return the next alarm and its automatic refresh time."""
+def decide(current, config, state):
+    """What should happen right now.
+
+    Returns a plan dict, or None when the alarm is switched off. The plan is
+    pure data: `action` is one of prepare / play / retry / skip / wait, and
+    `changes` are the runstate fields the caller must persist when it carries
+    the action out.
+    """
     if not config.get("enabled", True):
-        return None, None
-    hour, minute = map(int, config.get("play_time", "07:30").split(":"))
-    for offset in range(370):
-        day = now + timedelta(days=offset)
-        alarm_at = day.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if alarm_at >= now and eligible(alarm_at, config):
-            prepare_at = None if config.get("source_type") == "local" else alarm_at - timedelta(minutes=30)
-            return alarm_at, prepare_at
-    return None, None
+        return None
+    alarm_at, prepare_at = next_schedule(current, config)
+    configured_time = config.get("play_time") or DEFAULT_PLAY_TIME
+
+    def marker_of(when):
+        return f"{when.date().isoformat()}@{configured_time}"
+
+    # --- content preparation -------------------------------------------------
+    prepare = {"due": False, "marker": None, "next_attempt": None}
+    if alarm_at is not None and prepare_at is not None and prepare_at <= current < alarm_at:
+        marker = marker_of(alarm_at)
+        retry_at = parse_dt(state.get("prep_retry_at"))
+        if state.get("last_prepare_ok") == marker:
+            prepare.update(marker=marker, next_attempt=None)
+        elif retry_at is None or current >= retry_at:
+            prepare.update(due=True, marker=marker,
+                           next_attempt=current + timedelta(minutes=PREPARE_RETRY_MINUTES))
+        else:
+            prepare.update(marker=marker, next_attempt=retry_at)
+    if alarm_at is not None:
+        plan_alarm, plan_prepare = alarm_at, prepare_at
+    else:
+        plan_alarm, plan_prepare = None, None
+
+    # --- playback ------------------------------------------------------------
+    # Playback can target the upcoming alarm (its minute has arrived) or the
+    # most recent one, which stays actionable inside the catch-up window while
+    # next_schedule() has already moved on to tomorrow.
+    recent = previous_alarm(current, config)
+    upcoming = alarm_at if (alarm_at is not None and alarm_at <= current) else None
+    target = upcoming if upcoming is not None else recent
+    play = {"due": False, "marker": None, "next_attempt": None, "gave_up": False,
+            "late_minutes": None}
+
+    if target is not None and target <= current:
+        marker = marker_of(target)
+        window_end = target + timedelta(minutes=CATCH_UP_MINUTES)
+        if current < window_end:
+            # Ring (or retry) inside the window. A first attempt fires at the
+            # alarm minute; a retry is spaced by PLAY_RETRY_MINUTES.
+            already_attempted = state.get("last_play_day") == marker
+            last_attempt = parse_dt(state.get("last_play_at"))
+            on_time = current - target < timedelta(seconds=ON_TIME_GRACE_SECONDS)
+            if already_attempted and last_attempt is not None:
+                due_at = last_attempt + timedelta(minutes=PLAY_RETRY_MINUTES)
+            elif on_time:
+                # The alarm minute just arrived: ring without extra delay.
+                due_at = target
+            else:
+                # Woke up late: a short grace keeps the ring off the very edge.
+                due_at = target + timedelta(seconds=PLAY_FIRST_GRACE_SECONDS)
+            late_minutes = None
+            if not on_time:
+                late_minutes = round((current - target).total_seconds() / 60, 1)
+            if state.get("last_play_ok") == marker:
+                play.update(marker=marker)
+            elif current >= due_at:
+                play.update(due=True, marker=marker, late_minutes=late_minutes,
+                            next_attempt=current + timedelta(minutes=PLAY_RETRY_MINUTES))
+            else:
+                play.update(marker=marker, late_minutes=late_minutes, next_attempt=due_at)
+        elif (current <= window_end + timedelta(hours=MISS_REPORT_HOURS)
+                and state.get("last_play_ok") != marker
+                and state.get("last_missed_logged") != marker):
+            # The window is over without a success. Say so once, so a failed
+            # 07:30 is visible in logs and on the dashboard instead of silent.
+            play.update(marker=marker, gave_up=True, late_minutes=round(
+                (current - target).total_seconds() / 60, 1))
+
+    if prepare["due"]:
+        action = "prepare"
+    elif play["due"]:
+        action = "play"
+    elif play["gave_up"]:
+        action = "skip"
+    else:
+        action = "wait"
+
+    changes = {}
+    if prepare["due"]:
+        # Values are the same JSON-safe strings that get written to runstate,
+        # so an in-memory state behaves exactly like a reloaded one.
+        changes.update(last_prepare_day=prepare["marker"],
+                       prep_retry_at=prepare["next_attempt"].isoformat() if prepare["next_attempt"] else None)
+    if play["due"]:
+        changes.update(last_play_day=play["marker"], last_play_at=current.isoformat())
+    if play["gave_up"]:
+        # Only a marker, so the miss is logged once instead of every tick.
+        changes.update(last_missed_logged=play["marker"])
+
+    return {
+        "at": current.isoformat(timespec="seconds"),
+        "action": action,
+        "alarm_at": plan_alarm.isoformat(timespec="minutes") if plan_alarm else None,
+        "prepare_at": plan_prepare.isoformat(timespec="minutes") if plan_prepare else None,
+        "marker": play["marker"] or prepare["marker"],
+        "late_minutes": play["late_minutes"],
+        "next_attempt": (prepare["next_attempt"] or play["next_attempt"]).isoformat()
+                        if (prepare["next_attempt"] or play["next_attempt"]) else None,
+        "prepare_due": prepare["due"],
+        "play_due": play["due"],
+        "changes": changes,
+    }
 
 
 def validate(config):
-    match = re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", config.get("play_time", ""))
-    if not match:
+    if not isinstance(config, dict):
+        raise ValueError("配置格式无效，应为 JSON 对象")
+    if not TIME_PATTERN.fullmatch(str(config.get("play_time", ""))):
         raise ValueError("播放时间需为 HH:MM")
     if config.get("schedule_mode") not in {"workdays", "daily", "weekdays", "dates"}:
         raise ValueError("请选择有效的日期方式")
@@ -90,72 +274,146 @@ def validate(config):
         if not isinstance(dates, list):
             raise ValueError("日期列表无效")
         for value in dates:
+            if not isinstance(value, str):
+                raise ValueError("日期格式无效")
             if datetime.strptime(value, "%Y-%m-%d").date().isoformat() != value:
                 raise ValueError("日期格式无效")
-    source_type = config.get("source_type")
-    if source_type == "latest":
+    pattern = config.get("title_pattern") or ".*"
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        raise ValueError(f"标题筛选正则无效: {exc}")
+    if config.get("source_type") == "latest":
         if not re.fullmatch(r"https://space\.bilibili\.com/\d+(?:/video)?/?", config.get("source_url", "")):
             raise ValueError("请填写 B 站账号投稿页链接")
-        re.compile(config.get("title_pattern") or ".*")
-    elif source_type == "video":
+    elif config.get("source_type") == "video":
         if not re.fullmatch(r"https://www\.bilibili\.com/video/BV[a-zA-Z0-9]+/?(?:\?.*)?", config.get("video_url", "")):
             raise ValueError("请填写完整的 B 站 BV 视频链接")
-    elif source_type != "local":
+    elif config.get("source_type") != "local":
         raise ValueError("请选择播放内容类型")
+    for key in ("xiaomusic_url", "device_id", "output_mp3"):
+        if not str(config.get(key) or "").strip():
+            raise ValueError(f"配置缺少 {key}，请检查 config.json")
     return config
 
 
-def record(kind, result, message):
-    with LOCK:
-        state = read_json(RUN_PATH, {})
-        state[kind] = {"at": today().isoformat(timespec="seconds"), "result": result, "message": str(message)[-500:]}
-        write_json(RUN_PATH, state)
+def run_job(kind, job, wait=False):
+    """Run one job kind in a worker thread.
 
-
-def run_job(kind, job):
+    Returns (started, ok): `started` is False when the same kind is already
+    running. With `wait=True` the call blocks until this job finishes and `ok`
+    reports its real result, so the scheduler never drops a playback attempt
+    just because a slow download was still running.
+    """
     with LOCK:
         if kind in BUSY:
-            return False
+            return False, False
         BUSY.add(kind)
+        event = threading.Event()
+        BUSY_EVENTS[kind] = event
+    outcome = {"ok": False}
 
     def worker():
         try:
             config = read_json(CONFIG_PATH, {})
             job(config)
+            outcome["ok"] = True
             record(kind, "ok", "完成")
         except Exception as exc:
+            LOG.exception("%s job failed", kind)
             record(kind, "error", exc)
         finally:
             with LOCK:
                 BUSY.discard(kind)
+                BUSY_EVENTS.pop(kind, None)
+            event.set()
 
     threading.Thread(target=worker, daemon=True).start()
-    return True
+    if wait:
+        event.wait()
+        return True, outcome["ok"]
+    return True, False
+
+
+def prepare_job(config):
+    """Fetch/convert the configured content. Raises when it is not usable."""
+    if config.get("source_type") == "local":
+        target = Path(str(config.get("output_mp3") or ""))
+        if not target.is_file():
+            raise RuntimeError("本地音频文件不存在，请重新上传")
+        return
+    prepare_audio(config)
+
+
+def play_job(config):
+    play_audio(config, force=True)
+
+
+def prune_episodes(music_dir, current):
+    """Keep only the newest KEEP_EPISODES downloaded episodes.
+
+    Never deletes the active file, and tolerates locked files (the speaker may
+    still have an old MP3 open) by trying again next time.
+    """
+    try:
+        if not music_dir.is_dir():
+            return
+        files = sorted(music_dir.glob(EPISODE_GLOB), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError as exc:
+        LOG.warning("Could not list %s: %s", music_dir, exc)
+        return
+    active = Path(current).name if current else ""
+    for stale in files[KEEP_EPISODES:]:
+        if stale.name == active:
+            continue
+        try:
+            stale.unlink()
+            LOG.info("Removed old episode %s", stale.name)
+        except OSError as exc:
+            LOG.info("Kept old episode %s: %s", stale.name, exc)
 
 
 def scheduler():
+    LOG.info("Scheduler started; tick=%ss, catch-up=%smin, play retry=%smin",
+             SCHEDULER_TICK_SECONDS, CATCH_UP_MINUTES, PLAY_RETRY_MINUTES)
     while True:
         try:
-            now = today()
             config = read_json(CONFIG_PATH, {})
-            if config.get("enabled", True) and eligible(now, config):
-                hour, minute = map(int, config.get("play_time", "07:30").split(":"))
-                alarm_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                prepare_at = alarm_at - timedelta(minutes=30)
-                state = read_json(RUN_PATH, {})
-                marker = now.date().isoformat() + "@" + config.get("play_time", "07:30")
-                if (prepare_at.date() == now.date() and prepare_at <= now < alarm_at
-                        and state.get("last_prepare_day") != marker):
-                    state["last_prepare_day"] = marker
-                    write_json(RUN_PATH, state)
-                    run_job("prepare", prepare_audio)
-                if now.hour == hour and now.minute == minute and state.get("last_play_day") != marker:
-                    state["last_play_day"] = marker
-                    write_json(RUN_PATH, state)
-                    run_job("play", lambda c: play_audio(c, force=True))
-        except Exception as exc:
-            record("scheduler", "error", exc)
-        time.sleep(5)
+            state = read_json(RUN_PATH, {})
+            plan = decide(now(), config, state)
+            if plan is not None:
+                if plan["changes"]:
+                    state.update(plan["changes"])
+                # Evidence that this runner was alive right now, used to tell a
+                # genuinely missed alarm from one the machine slept through.
+                state["last_seen"] = plan["at"]
+                handled = None
+                if plan["prepare_due"]:
+                    LOG.info("Preparing content for %s", plan["marker"])
+                    handled = "prepare"
+                    if run_job("prepare", prepare_job, wait=True)[1]:
+                        state["last_prepare_ok"] = plan["marker"]
+                        state["prep_retry_at"] = None
+                        prune_episodes(Path(str(config.get("output_mp3") or ROOT)).parent,
+                                       config.get("output_mp3"))
+                elif plan["play_due"]:
+                    if plan["late_minutes"]:
+                        LOG.info("Playing for %s (late by %s min)", plan["marker"], plan["late_minutes"])
+                    else:
+                        LOG.info("Playing for %s", plan["marker"])
+                    handled = "play"
+                    if run_job("play", play_job, wait=True)[1]:
+                        state["last_play_ok"] = plan["marker"]
+                elif plan["action"] == "skip":
+                    LOG.error("Gave up on %s: no successful playback within %s minutes",
+                              plan["marker"], CATCH_UP_MINUTES)
+                state["plan"] = {k: v for k, v in plan.items() if k != "changes"}
+                if handled:
+                    state["plan"]["handled"] = handled
+                write_json(RUN_PATH, state)
+        except Exception:
+            LOG.exception("Scheduler tick failed")
+        time.sleep(SCHEDULER_TICK_SECONDS)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -179,11 +437,24 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/status":
             config = read_json(CONFIG_PATH, {})
             state = read_json(RUN_PATH, {})
-            next_play, next_prepare = next_schedule(today(), config)
+            current = now()
+            next_play, next_prepare = next_schedule(current, config)
+            output = str(config.get("output_mp3") or "")
+            last_due = previous_alarm(current, config)
+            planned = f"{config.get('play_time')}"
+            last_marker = state.get("last_play_day")
             state["busy"] = bool(BUSY)
-            state["episode"] = read_json(ROOT / "state.json", {})
-            state["audio_ready"] = Path(config["output_mp3"]).is_file()
-            state["auto_update"] = config.get("source_type") != "local"
+            state["episode"] = read_json(STATE_PATH, {})
+            state["audio_ready"] = bool(output) and Path(output).is_file()
+            state["auto_update"] = config.get("source_type", "latest") != "local"
+            state["catch_up_minutes"] = CATCH_UP_MINUTES
+            state["last_alarm"] = last_due.isoformat(timespec="minutes") if last_due else None
+            state["last_play_ok"] = occurred_at(state, "play", last_due, config)
+            # Missed = the most recent attempt was for a real alarm and it failed.
+            state["last_play_missed"] = bool(
+                last_due and isinstance(last_marker, str) and last_marker.endswith(f"@{planned}")
+                and state.get("last_play_ok") is not True
+            )
             state["next_play"] = next_play.isoformat(timespec="minutes") if next_play else None
             state["next_prepare"] = next_prepare.isoformat(timespec="minutes") if next_prepare else None
             self.send_json(200, state)
@@ -194,7 +465,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         origin = self.headers.get("Origin", "")
-        if origin and origin not in ("http://127.0.0.1:58100", "http://localhost:58100"):
+        if origin and origin not in (f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"):
             self.send_json(403, {"error": "Wrong origin"})
             return
         try:
@@ -212,19 +483,23 @@ class Handler(BaseHTTPRequestHandler):
                     changed = any(k in incoming and incoming[k] != config.get(k) for k in content_keys)
                     config.update({k: v for k, v in incoming.items() if k in allowed})
                     validate(config)
-                    if config["source_type"] == "local" and read_json(ROOT / "state.json", {}).get("source") != "local":
+                    if config.get("source_type") == "local" and read_json(STATE_PATH, {}).get("source") != "local":
                         raise ValueError("请先上传本地音频")
                     write_json(CONFIG_PATH, config)
-                refreshing = changed and config["source_type"] != "local" and run_job("prepare", prepare_audio)
-                self.send_json(200, {"ok": True, "refreshing": refreshing})
+                started = False
+                if changed and config.get("source_type") != "local":
+                    started = run_job("prepare", prepare_job)[0]
+                self.send_json(200, {"ok": True, "refreshing": started})
             elif self.path == "/api/prepare":
-                self.send_json(202 if run_job("prepare", prepare_audio) else 409, {"ok": True})
+                started = run_job("prepare", prepare_job)[0]
+                self.send_json(202 if started else 409, {"ok": started})
             elif self.path == "/api/play":
-                self.send_json(202 if run_job("play", lambda c: play_audio(c, force=True)) else 409, {"ok": True})
+                started = run_job("play", play_job)[0]
+                self.send_json(202 if started else 409, {"ok": started})
             elif self.path == "/api/stop":
                 config = read_json(CONFIG_PATH, {})
-                url = config["xiaomusic_url"].rstrip("/") + "/device/stop"
-                data = json.dumps({"did": config["device_id"]}).encode("utf-8")
+                url = str(config.get("xiaomusic_url") or "").rstrip("/") + "/device/stop"
+                data = json.dumps({"did": config.get("device_id")}).encode("utf-8")
                 request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
                 with urllib.request.urlopen(request, timeout=15) as response:
                     result = json.load(response)
@@ -235,20 +510,24 @@ class Handler(BaseHTTPRequestHandler):
                 if "prepare" in BUSY:
                     raise RuntimeError("正在更新网络内容，请稍后上传")
                 config = read_json(CONFIG_PATH, {})
-                music_dir = Path(config["output_mp3"]).parent
+                music_dir = Path(str(config.get("output_mp3") or (ROOT / "music" / "alarm.mp3"))).parent
+                music_dir.mkdir(parents=True, exist_ok=True)
                 target = music_dir / f"本地音频-{uuid.uuid4().hex[:12]}.mp3"
                 temp = ROOT / "tmp" / "uploaded-audio"
                 temp.parent.mkdir(parents=True, exist_ok=True)
                 temp.write_bytes(body)
-                import imageio_ffmpeg
                 converted = target.with_name(target.stem + ".new.mp3")
-                subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-i", str(temp),
-                                "-vn", "-codec:a", "libmp3lame", "-qscale:a", "5", str(converted)],
-                               capture_output=True, check=True, timeout=300)
-                converted.replace(target)
-                temp.unlink(missing_ok=True)
-                url = config["xiaomusic_url"].rstrip("/") + "/cmd"
-                payload = json.dumps({"did": config["device_id"], "cmd": "刷新列表"}, ensure_ascii=False).encode("utf-8")
+                try:
+                    import imageio_ffmpeg
+                    subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-i", str(temp),
+                                    "-vn", "-codec:a", "libmp3lame", "-qscale:a", "5", str(converted)],
+                                   capture_output=True, check=True, timeout=300)
+                    converted.replace(target)
+                finally:
+                    temp.unlink(missing_ok=True)
+                    converted.unlink(missing_ok=True)
+                url = str(config.get("xiaomusic_url") or "").rstrip("/") + "/cmd"
+                payload = json.dumps({"did": config.get("device_id"), "cmd": "刷新列表"}, ensure_ascii=False).encode("utf-8")
                 request = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
                 with urllib.request.urlopen(request, timeout=20) as response:
                     result = json.load(response)
@@ -257,8 +536,8 @@ class Handler(BaseHTTPRequestHandler):
                 config["output_mp3"] = str(target)
                 config["source_type"] = "local"
                 write_json(CONFIG_PATH, config)
-                write_json(ROOT / "state.json", {"title": unquote(self.headers.get("X-Filename", "本地音频")),
-                                                      "source": "local", "prepared_at": today().isoformat()})
+                write_json(STATE_PATH, {"title": unquote(self.headers.get("X-Filename", "本地音频")),
+                                        "source": "local", "prepared_at": now().isoformat()})
                 self.send_json(200, {"ok": True})
             else:
                 self.send_json(404, {"error": "Not found"})
@@ -270,5 +549,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    setup_logging()
     threading.Thread(target=scheduler, daemon=True).start()
-    ThreadingHTTPServer(("127.0.0.1", 58100), Handler).serve_forever()
+    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

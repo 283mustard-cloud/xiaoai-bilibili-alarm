@@ -97,6 +97,7 @@
           <div class="status-item"><strong>已准备的内容</strong><span id="episode">读取中…</span></div>
           <div class="status-item"><strong>下次自动更新</strong><span id="next_prepare">计算中…</span></div>
           <div class="status-item"><strong>下次播放</strong><span id="next_play">计算中…</span></div>
+          <div class="status-item"><strong>上次计划播放</strong><span id="last_alarm">—</span></div>
           <div class="status-item"><strong>上次更新</strong><span id="prepare_status">—</span></div>
           <div class="status-item"><strong>上次播放</strong><span id="play_status">—</span></div>
         </div>
@@ -107,15 +108,24 @@
 <script>
 const $ = id => document.getElementById(id);
 let includeDates=[], excludeDates=[];
+let leadMinutes=30;
 const days=['周一','周二','周三','周四','周五','周六','周日'];
 $('weekdays').innerHTML=days.map((d,i)=>`<label class="day"><input type="checkbox" value="${i}">${d}</label>`).join('');
-function showFields(){ const local=$('source_type').value==='local'; $('weekdays_box').classList.toggle('hidden',$('schedule_mode').value!=='weekdays'); $('latest_box').classList.toggle('hidden',$('source_type').value!=='latest'); $('video_box').classList.toggle('hidden',$('source_type').value!=='video'); $('local_box').classList.toggle('hidden',!local); $('update_notice').textContent=local?'本地音频无需自动更新，将在设定时间直接播放。':'网络内容会在每个播放日提前 30 分钟自动检查并更新，无需手动操作。'; }
+function showFields(){ const local=$('source_type').value==='local'; $('weekdays_box').classList.toggle('hidden',$('schedule_mode').value!=='weekdays'); $('latest_box').classList.toggle('hidden',$('source_type').value!=='latest'); $('video_box').classList.toggle('hidden',$('source_type').value!=='video'); $('local_box').classList.toggle('hidden',!local); $('update_notice').textContent=local?'本地音频无需自动更新，将在设定时间直接播放。':`网络内容会在播放前 ${leadMinutes} 分钟自动检查并更新；失败会每 10 分钟重试。`; }
 function chips(id,dates){ $(id).innerHTML=''; dates.sort().forEach(date=>{const b=document.createElement('button'); b.className='chip'; b.textContent=date+' ×'; b.onclick=()=>{dates.splice(dates.indexOf(date),1);chips(id,dates)}; $(id).appendChild(b)}); }
 function say(message, error=false){ $('toast').textContent=message; $('toast').style.color=error?'#bb3344':'#1764bb'; }
 async function api(path,method='GET',body){const r=await fetch(path,{method,headers:body&&!(body instanceof Blob)?{'Content-Type':'application/json'}:{},body:body instanceof Blob?body:body?JSON.stringify(body):undefined});const j=await r.json();if(!r.ok)throw Error(j.error||'操作失败');return j;}
-async function load(){const c=await api('/api/config'); $('enabled').checked=c.enabled!==false; $('play_time').value=c.play_time||'07:30'; $('schedule_mode').value=c.schedule_mode||'workdays'; $('source_type').value=c.source_type||'latest'; $('source_url').value=c.source_url||''; $('title_pattern').value=c.title_pattern||''; $('video_url').value=c.video_url||''; includeDates=c.include_dates||[];excludeDates=c.exclude_dates||[];chips('include_dates',includeDates);chips('exclude_dates',excludeDates);document.querySelectorAll('#weekdays input').forEach(x=>x.checked=(c.weekdays||[]).includes(Number(x.value)));showFields();await refresh();}
+async function load(){const c=await api('/api/config'); $('enabled').checked=c.enabled!==false; $('play_time').value=c.play_time||'07:30'; leadMinutes=c.prepare_lead_minutes||30; $('schedule_mode').value=c.schedule_mode||'workdays'; $('source_type').value=c.source_type||'latest'; $('source_url').value=c.source_url||''; $('title_pattern').value=c.title_pattern||''; $('video_url').value=c.video_url||''; includeDates=c.include_dates||[];excludeDates=c.exclude_dates||[];chips('include_dates',includeDates);chips('exclude_dates',excludeDates);document.querySelectorAll('#weekdays input').forEach(x=>x.checked=(c.weekdays||[]).includes(Number(x.value)));showFields();await refresh();}
 function showTime(value){return value?value.replace('T',' ').replace('+08:00',''):'未安排'}
-async function refresh(){try{const s=await api('/api/status');$('badge').textContent=s.busy?'正在处理':s.audio_ready?'服务正常':'等待音频';$('episode').textContent=s.episode?.title||'尚未准备';$('next_prepare').textContent=s.auto_update?showTime(s.next_prepare):'本地音频无需更新';$('next_play').textContent=showTime(s.next_play);for(const kind of ['prepare','play']){const v=s[kind];$(kind+'_status').textContent=v?`${v.at} · ${v.result==='ok'?'成功':'失败'} · ${v.message}`:'尚未运行';}}catch(e){$('badge').textContent='连接失败';}}
+function relative(value, catchUp){
+  if(!value) return '';
+  const target=new Date(value), diff=target.getTime()-Date.now();
+  if(diff<=0 && diff>-catchUp*60000) return '（正在进行）';
+  if(diff<=0) return '（已过）';
+  const totalMinutes=Math.round(diff/60000), hours=Math.floor(totalMinutes/60), minutes=totalMinutes%60;
+  return hours?`（还有 ${hours} 小时 ${minutes} 分）`:`（还有 ${minutes} 分）`;
+}
+async function refresh(){try{const s=await api('/api/status');$('badge').textContent=s.busy?'正在处理':s.audio_ready?'服务正常':'等待音频';$('episode').textContent=s.episode?.title||'尚未准备';$('next_prepare').textContent=s.auto_update?showTime(s.next_prepare)+relative(s.next_prepare,0):'本地音频无需更新';$('next_play').textContent=showTime(s.next_play)+relative(s.next_play,0);$('last_alarm').textContent=s.last_alarm?showTime(s.last_alarm)+(s.last_play_ok===true?' · 已播放':s.last_play_missed?' · 未成功':' · 未记录'):'—';for(const kind of ['prepare','play']){const v=s[kind];$(kind+'_status').textContent=v?`${v.at} · ${v.result==='ok'?'成功':'失败'} · ${v.message}`:'尚未运行';}if(s.last_play_missed)say('上次计划播放未成功，可在 logs/alarm.log 查看原因。',true);}catch(e){$('badge').textContent='连接失败';}}
 $('schedule_mode').onchange=showFields;$('source_type').onchange=showFields;
 for(const kind of ['include','exclude']){$('add_'+kind).onclick=()=>{const list=kind==='include'?includeDates:excludeDates;const input=$(kind+'_date');if(input.value&&!list.includes(input.value)){list.push(input.value);chips(kind+'_dates',list)}input.value='';};}
 $('save').onclick=async()=>{try{const config={enabled:$('enabled').checked,play_time:$('play_time').value,schedule_mode:$('schedule_mode').value,weekdays:[...document.querySelectorAll('#weekdays input:checked')].map(x=>Number(x.value)),include_dates:includeDates,exclude_dates:excludeDates,source_type:$('source_type').value,source_url:$('source_url').value.trim(),title_pattern:$('title_pattern').value.trim(),video_url:$('video_url').value.trim()};const result=await api('/api/config','POST',config);say(result.refreshing?'设置已保存，正在准备新内容。':'设置已保存。');}catch(e){say(e.message,true)}};

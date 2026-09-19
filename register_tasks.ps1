@@ -1,7 +1,13 @@
-# Run only after XiaoMusic can play the MP3 on the physical speaker.
+# Legacy fixed-time tasks (07:00 prepare / 07:30 play). Prefer migrate_to_app.ps1,
+# which enables the configurable dashboard scheduler instead.
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$pythonExe = (Get-Command python -ErrorAction Stop).Source
+$venvPython = Join-Path $projectRoot '.venv\Scripts\python.exe'
+if (Test-Path $venvPython) {
+    $pythonExe = $venvPython
+} else {
+    $pythonExe = (Get-Command python -ErrorAction Stop).Source
+}
 $prepareScript = Join-Path $projectRoot 'prepare_episode.py'
 $playScript = Join-Path $projectRoot 'play_alarm.py'
 $serverScript = Join-Path $projectRoot 'launch_xiaomusic.py'

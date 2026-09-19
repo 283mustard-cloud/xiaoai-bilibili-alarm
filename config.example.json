@@ -11,5 +11,6 @@
   "include_dates": [],
   "exclude_dates": [],
   "source_type": "latest",
-  "video_url": ""
+  "video_url": "",
+  "prepare_lead_minutes": 30
 }
