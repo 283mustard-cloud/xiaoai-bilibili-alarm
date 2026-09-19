@@ -10,6 +10,7 @@ public partial class App : Application
         base.OnStartup(e);
         AppPaths.Ensure();
         Log.Initialize();
+        if (e.Args.Length > 0) Log.Info("进程参数：" + string.Join(" | ", e.Args));
         if (e.Args.Length >= 2 && (e.Args[0] == "--prepare" || e.Args[0] == "--prepare-now" || e.Args[0] == "--fire" || e.Args[0] == "--fire-now" || e.Args[0] == "--preview-now"))
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;

@@ -8,9 +8,11 @@ public static class AlarmRunner
     {
         try
         {
+            Log.Info($"后台入口启动：mode={mode}, id={id}, pid={Environment.ProcessId}, session={Environment.UserInteractive}");
             var data = await DataStore.LoadAsync();
             var alarm = data.Alarms.FirstOrDefault(a => a.Id == id);
-            if (alarm is null || !alarm.Enabled) return 0;
+            if (alarm is null) { Log.Error($"后台任务跳过：找不到闹钟 {id}"); return 2; }
+            if (!alarm.Enabled) { Log.Info($"后台任务跳过：{alarm.Name} 已关闭"); return 0; }
             var now = DateTimeOffset.Now;
             var targetDate = DateOnly.FromDateTime(now.DateTime);
             if (mode == "--prepare-now")
@@ -21,7 +23,7 @@ public static class AlarmRunner
             {
                 var alarmTime = TimeOnly.Parse(alarm.Time);
                 if (alarmTime.AddMinutes(-alarm.PrepareMinutes) > alarmTime) targetDate = targetDate.AddDays(1);
-                if (!CalendarRules.ShouldRing(alarm, targetDate)) return 0;
+                if (!CalendarRules.ShouldRing(alarm, targetDate)) { Log.Info($"准备任务跳过：{targetDate} 不符合重复规则"); return 0; }
                 var targetAlarm = targetDate.ToDateTime(alarmTime);
                 if (now.LocalDateTime > targetAlarm.AddMinutes(15)) return 0;
                 await PrepareAsync(alarm, data.Settings);
@@ -36,14 +38,14 @@ public static class AlarmRunner
             }
             else
             {
-                if (!CalendarRules.ShouldRing(alarm, targetDate)) return 0;
+                if (!CalendarRules.ShouldRing(alarm, targetDate)) { Log.Info($"播放任务跳过：{targetDate} 不符合重复规则 repeat={alarm.Repeat}"); return 0; }
                 var scheduled = targetDate.ToDateTime(TimeOnly.Parse(alarm.Time));
                 if (now.LocalDateTime > scheduled.AddMinutes(15))
                 {
                     await DataStore.UpdateAlarmAsync(alarm.Id, a => a.LastResult = "电脑错过闹钟超过 15 分钟，未补播");
                     return 0;
                 }
-                if (alarm.LastFiredAt?.Date == now.Date && alarm.LastResult == "播放成功") return 0;
+                if (alarm.LastFiredAt?.Date == now.Date && alarm.LastResult == "播放成功") { Log.Info("播放任务跳过：今天已经播放成功"); return 0; }
                 await FireAsync(alarm, data.Settings);
             }
             return 0;
