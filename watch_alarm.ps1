@@ -68,27 +68,41 @@ try {
     $taskName = $task.TaskName
 
     if ($task.State -eq 'Running') {
-        # The task process is alive but not serving yet: give it a moment
-        # instead of piling on a second instance.
-        Start-Sleep -Seconds 20
+        # The task process may be alive but not serving (or the state may be
+        # stale after a kill). Give it a moment, then force a clean restart.
+        Start-Sleep -Seconds 15
         if (Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue) {
             Write-Log "task $taskName was running; port came up by itself"
             exit 0
         }
         Write-Log "task $taskName is running but port $Port stayed closed; restarting it"
-        Stop-ScheduledTask -TaskName $taskName -TaskPath $taskPath
-        Start-Sleep -Seconds 3
+        Stop-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 5
     }
 
-    Start-ScheduledTask -TaskName $taskName -TaskPath $taskPath
-    for ($attempt = 1; $attempt -le 10; $attempt++) {
-        Start-Sleep -Seconds 3
-        if (Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue) {
-            Write-Log "started task $taskName; port $Port is listening again"
-            exit 0
+    # A start can be refused (0x1) while Task Scheduler still considers the
+    # previous instance active, so retry a few times before giving up.
+    $started = $false
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        try {
+            Start-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop
+            $started = $true
+        } catch {
+            Write-Log "start attempt $attempt failed: $($_.Exception.Message)"
+        }
+        for ($wait = 0; $wait -lt 8; $wait++) {
+            Start-Sleep -Seconds 3
+            if (Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue) {
+                Write-Log "started task $taskName; port $Port is listening again"
+                exit 0
+            }
+        }
+        if ($started) {
+            # ${attempt} needs braces: "$attempt:" would parse as a drive path.
+            Write-Log "attempt ${attempt}: task $taskName started but port $Port is still closed"
         }
     }
-    Write-Log "ERROR: started task $taskName but port $Port is still closed"
+    Write-Log "ERROR: could not restore port $Port via task $taskName after 4 attempts"
     exit 1
 } catch {
     Write-Log "ERROR: $($_.Exception.Message)"

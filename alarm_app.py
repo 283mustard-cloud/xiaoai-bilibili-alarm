@@ -114,9 +114,28 @@ def read_json(path, default):
 
 
 def write_json(path, value):
+    """Atomically replace a JSON file, surviving transient Windows lock errors.
+
+    The final os.replace() can collide with another writer or with a scanner
+    holding a brief handle on the target, which surfaces as PermissionError.
+    Losing runstate.json (or crashing the scheduler over it) would be worse
+    than waiting a few milliseconds, so retry briefly before giving up.
+    """
+    body = json.dumps(value, ensure_ascii=False, indent=2)
     temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp.replace(path)
+    last_error = None
+    for attempt in range(5):
+        try:
+            temp.write_text(body, encoding="utf-8")
+            temp.replace(path)
+            return
+        except PermissionError as exc:      # another writer or a scanner holds it
+            last_error = exc
+            time.sleep(0.05 * (attempt + 1))
+        except OSError as exc:
+            last_error = exc
+            time.sleep(0.05 * (attempt + 1))
+    raise last_error
 
 
 def record(kind, result, message):
