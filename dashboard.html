@@ -41,6 +41,7 @@
     .status-item strong { display:block; font-size:13px; color:#344054; margin-bottom:3px; }
     .status-item span { display:block; font-size:13px; color:#667085; overflow-wrap:anywhere; }
     .toast { margin-top:14px; min-height:24px; font-size:13px; color:#1764bb; }
+    .notice { margin:0 0 18px; padding:12px 14px; border-radius:10px; background:#eef6ff; color:#245b91; font-size:13px; line-height:1.6; }
     .hidden { display:none; }
     @media(max-width:760px) { main{margin-top:20px;padding:0 15px 30px} .layout{grid-template-columns:1fr} header{align-items:flex-start} h1{font-size:25px} }
   </style>
@@ -72,6 +73,7 @@
       </section>
       <section class="card">
         <h2>播放内容</h2>
+        <div class="notice" id="update_notice">网络内容会在每个播放日提前 30 分钟自动检查并更新，无需手动操作。</div>
         <div class="field"><label for="source_type">内容来源</label><select id="source_type"><option value="latest">B 站账号最新投稿</option><option value="video">指定 B 站视频</option><option value="local">本地音频文件</option></select></div>
         <div id="latest_box">
           <div class="field"><label for="source_url">账号投稿页</label><input id="source_url" type="url" placeholder="https://space.bilibili.com/UP主UID/video"></div>
@@ -93,6 +95,8 @@
         <h2>运行状态</h2>
         <div class="status">
           <div class="status-item"><strong>已准备的内容</strong><span id="episode">读取中…</span></div>
+          <div class="status-item"><strong>下次自动更新</strong><span id="next_prepare">计算中…</span></div>
+          <div class="status-item"><strong>下次播放</strong><span id="next_play">计算中…</span></div>
           <div class="status-item"><strong>上次更新</strong><span id="prepare_status">—</span></div>
           <div class="status-item"><strong>上次播放</strong><span id="play_status">—</span></div>
         </div>
@@ -105,12 +109,13 @@ const $ = id => document.getElementById(id);
 let includeDates=[], excludeDates=[];
 const days=['周一','周二','周三','周四','周五','周六','周日'];
 $('weekdays').innerHTML=days.map((d,i)=>`<label class="day"><input type="checkbox" value="${i}">${d}</label>`).join('');
-function showFields(){ $('weekdays_box').classList.toggle('hidden',$('schedule_mode').value!=='weekdays'); $('latest_box').classList.toggle('hidden',$('source_type').value!=='latest'); $('video_box').classList.toggle('hidden',$('source_type').value!=='video'); $('local_box').classList.toggle('hidden',$('source_type').value!=='local'); }
+function showFields(){ const local=$('source_type').value==='local'; $('weekdays_box').classList.toggle('hidden',$('schedule_mode').value!=='weekdays'); $('latest_box').classList.toggle('hidden',$('source_type').value!=='latest'); $('video_box').classList.toggle('hidden',$('source_type').value!=='video'); $('local_box').classList.toggle('hidden',!local); $('update_notice').textContent=local?'本地音频无需自动更新，将在设定时间直接播放。':'网络内容会在每个播放日提前 30 分钟自动检查并更新，无需手动操作。'; }
 function chips(id,dates){ $(id).innerHTML=''; dates.sort().forEach(date=>{const b=document.createElement('button'); b.className='chip'; b.textContent=date+' ×'; b.onclick=()=>{dates.splice(dates.indexOf(date),1);chips(id,dates)}; $(id).appendChild(b)}); }
 function say(message, error=false){ $('toast').textContent=message; $('toast').style.color=error?'#bb3344':'#1764bb'; }
 async function api(path,method='GET',body){const r=await fetch(path,{method,headers:body&&!(body instanceof Blob)?{'Content-Type':'application/json'}:{},body:body instanceof Blob?body:body?JSON.stringify(body):undefined});const j=await r.json();if(!r.ok)throw Error(j.error||'操作失败');return j;}
 async function load(){const c=await api('/api/config'); $('enabled').checked=c.enabled!==false; $('play_time').value=c.play_time||'07:30'; $('schedule_mode').value=c.schedule_mode||'workdays'; $('source_type').value=c.source_type||'latest'; $('source_url').value=c.source_url||''; $('title_pattern').value=c.title_pattern||''; $('video_url').value=c.video_url||''; includeDates=c.include_dates||[];excludeDates=c.exclude_dates||[];chips('include_dates',includeDates);chips('exclude_dates',excludeDates);document.querySelectorAll('#weekdays input').forEach(x=>x.checked=(c.weekdays||[]).includes(Number(x.value)));showFields();await refresh();}
-async function refresh(){try{const s=await api('/api/status');$('badge').textContent=s.busy?'正在处理':s.audio_ready?'服务正常':'等待音频';$('episode').textContent=s.episode?.title||'尚未准备';for(const kind of ['prepare','play']){const v=s[kind];$(kind+'_status').textContent=v?`${v.at} · ${v.result==='ok'?'成功':'失败'} · ${v.message}`:'尚未运行';}}catch(e){$('badge').textContent='连接失败';}}
+function showTime(value){return value?value.replace('T',' ').replace('+08:00',''):'未安排'}
+async function refresh(){try{const s=await api('/api/status');$('badge').textContent=s.busy?'正在处理':s.audio_ready?'服务正常':'等待音频';$('episode').textContent=s.episode?.title||'尚未准备';$('next_prepare').textContent=s.auto_update?showTime(s.next_prepare):'本地音频无需更新';$('next_play').textContent=showTime(s.next_play);for(const kind of ['prepare','play']){const v=s[kind];$(kind+'_status').textContent=v?`${v.at} · ${v.result==='ok'?'成功':'失败'} · ${v.message}`:'尚未运行';}}catch(e){$('badge').textContent='连接失败';}}
 $('schedule_mode').onchange=showFields;$('source_type').onchange=showFields;
 for(const kind of ['include','exclude']){$('add_'+kind).onclick=()=>{const list=kind==='include'?includeDates:excludeDates;const input=$(kind+'_date');if(input.value&&!list.includes(input.value)){list.push(input.value);chips(kind+'_dates',list)}input.value='';};}
 $('save').onclick=async()=>{try{const config={enabled:$('enabled').checked,play_time:$('play_time').value,schedule_mode:$('schedule_mode').value,weekdays:[...document.querySelectorAll('#weekdays input:checked')].map(x=>Number(x.value)),include_dates:includeDates,exclude_dates:excludeDates,source_type:$('source_type').value,source_url:$('source_url').value.trim(),title_pattern:$('title_pattern').value.trim(),video_url:$('video_url').value.trim()};const result=await api('/api/config','POST',config);say(result.refreshing?'设置已保存，正在准备新内容。':'设置已保存。');}catch(e){say(e.message,true)}};

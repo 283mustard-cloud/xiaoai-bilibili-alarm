@@ -62,6 +62,20 @@ def eligible(day, config):
     raise ValueError("Unknown schedule mode")
 
 
+def next_schedule(now, config):
+    """Return the next alarm and its automatic refresh time."""
+    if not config.get("enabled", True):
+        return None, None
+    hour, minute = map(int, config.get("play_time", "07:30").split(":"))
+    for offset in range(370):
+        day = now + timedelta(days=offset)
+        alarm_at = day.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if alarm_at >= now and eligible(alarm_at, config):
+            prepare_at = None if config.get("source_type") == "local" else alarm_at - timedelta(minutes=30)
+            return alarm_at, prepare_at
+    return None, None
+
+
 def validate(config):
     match = re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", config.get("play_time", ""))
     if not match:
@@ -130,8 +144,8 @@ def scheduler():
                 prepare_at = alarm_at - timedelta(minutes=30)
                 state = read_json(RUN_PATH, {})
                 marker = now.date().isoformat() + "@" + config.get("play_time", "07:30")
-                if (prepare_at.date() == now.date() and now.hour == prepare_at.hour
-                        and now.minute == prepare_at.minute and state.get("last_prepare_day") != marker):
+                if (prepare_at.date() == now.date() and prepare_at <= now < alarm_at
+                        and state.get("last_prepare_day") != marker):
                     state["last_prepare_day"] = marker
                     write_json(RUN_PATH, state)
                     run_job("prepare", prepare_audio)
@@ -165,9 +179,13 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/status":
             config = read_json(CONFIG_PATH, {})
             state = read_json(RUN_PATH, {})
+            next_play, next_prepare = next_schedule(today(), config)
             state["busy"] = bool(BUSY)
             state["episode"] = read_json(ROOT / "state.json", {})
             state["audio_ready"] = Path(config["output_mp3"]).is_file()
+            state["auto_update"] = config.get("source_type") != "local"
+            state["next_play"] = next_play.isoformat(timespec="minutes") if next_play else None
+            state["next_prepare"] = next_prepare.isoformat(timespec="minutes") if next_prepare else None
             self.send_json(200, state)
         elif self.path == "/api/config":
             self.send_json(200, read_json(CONFIG_PATH, {}))
