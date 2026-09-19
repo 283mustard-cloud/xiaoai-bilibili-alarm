@@ -369,6 +369,56 @@ def test_long_run_is_stable():
     check("no leftover retry timestamp", state.get("prep_retry_at"), None)
 
 
+def test_run_job_result_survives_scheduler_write():
+    """A job's runstate record must not be clobbered by the scheduler.
+
+    run_job() runs in a worker thread and writes its own "last prepare/play
+    result" into runstate.json. The scheduler also writes markers after waiting
+    for that job, so a merge based on a snapshot taken before the job would
+    erase the record and make the dashboard show "尚未运行" even though the job
+    had run.
+    """
+    print("17) scheduler state writes keep the job's result record")
+    reset()
+    config = base_config()
+    original_write = app.write_json
+    store = {}
+
+    def fake_write(path, value):
+        if path == app.RUN_PATH:
+            store.clear()
+            store.update(json.loads(json.dumps(value)))
+        else:
+            original_write(path, value)
+
+    def fake_read(path, default):
+        if path == app.RUN_PATH:
+            return dict(store)
+        if path == app.CONFIG_PATH:
+            return config
+        return default.copy()
+
+    app.write_json = fake_write
+    app.read_json = fake_read
+    # Restore a real record() so the job thread writes its result the same way
+    # production does (the harness stubs it out everywhere else).
+    app.record = lambda kind, result, message: store.update({
+        kind: {"at": "2026-09-21T07:00:00+08:00", "result": result, "message": str(message)}})
+    try:
+        app.run_scheduler_tick(config, {}, MONDAY.replace(hour=7))
+        check("prepare result record survives", (store.get("prepare") or {}).get("result"), "ok")
+        check("prepare marker survives", store.get("last_prepare_ok"), "2026-09-21@07:30")
+        check("plan snapshot still written", (store.get("plan") or {}).get("action"), "prepare")
+
+        store.clear()
+        app.run_scheduler_tick(config, {}, MONDAY.replace(hour=7, minute=30))
+        check("play result record survives", (store.get("play") or {}).get("result"), "ok")
+        check("play marker survives", store.get("last_play_ok"), "2026-09-21@07:30")
+    finally:
+        app.write_json = original_write
+        app.read_json = lambda path, default: config_holder["value"] if path == app.CONFIG_PATH else default.copy()
+
+
 def main():
     print("Alarm schedule regression tests\n")
     for test in (
@@ -388,6 +438,7 @@ def main():
         test_config_validation,
         test_atomic_state_write,
         test_long_run_is_stable,
+        test_run_job_result_survives_scheduler_write,
     ):
         test()
         print()

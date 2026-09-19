@@ -373,6 +373,62 @@ def prune_episodes(music_dir, current):
             LOG.info("Kept old episode %s: %s", stale.name, exc)
 
 
+def merge_state(changes):
+    """Re-read runstate.json and apply `changes` on top of the current content.
+
+    A job (prepare/play) runs in a worker thread and writes its own "last
+    result" record through record() while this thread waits for it. Writing
+    back a snapshot taken before the job would erase that record, which is
+    exactly what made the dashboard claim a job had never run.
+    """
+    with LOCK:
+        merged = read_json(RUN_PATH, {})
+        merged.update(changes)
+        write_json(RUN_PATH, merged)
+        return merged
+
+
+def run_scheduler_tick(config, state, current=None):
+    """One scheduler iteration, separated from the loop so it can be tested."""
+    current = current or now()
+    plan = decide(current, config, state)
+    if plan is None:
+        return None
+    state.update(plan["changes"])
+    # Evidence that this runner was alive right now, used to tell a genuinely
+    # missed alarm from one the machine slept through.
+    updates = dict(plan["changes"])
+    updates["last_seen"] = plan["at"]
+
+    handled = None
+    if plan["prepare_due"]:
+        LOG.info("Preparing content for %s", plan["marker"])
+        handled = "prepare"
+        if run_job("prepare", prepare_job, wait=True)[1]:
+            updates["last_prepare_ok"] = plan["marker"]
+            updates["prep_retry_at"] = None
+            prune_episodes(Path(str(config.get("output_mp3") or ROOT)).parent,
+                           config.get("output_mp3"))
+    elif plan["play_due"]:
+        if plan["late_minutes"]:
+            LOG.info("Playing for %s (late by %s min)", plan["marker"], plan["late_minutes"])
+        else:
+            LOG.info("Playing for %s", plan["marker"])
+        handled = "play"
+        if run_job("play", play_job, wait=True)[1]:
+            updates["last_play_ok"] = plan["marker"]
+    elif plan["action"] == "skip":
+        LOG.error("Gave up on %s: no successful playback within %s minutes",
+                  plan["marker"], CATCH_UP_MINUTES)
+
+    snapshot = {k: v for k, v in plan.items() if k != "changes"}
+    if handled:
+        snapshot["handled"] = handled
+    updates["plan"] = snapshot
+    state.update({k: v for k, v in updates.items() if k != "last_seen"})
+    return merge_state(updates)
+
+
 def scheduler():
     LOG.info("Scheduler started; tick=%ss, catch-up=%smin, play retry=%smin",
              SCHEDULER_TICK_SECONDS, CATCH_UP_MINUTES, PLAY_RETRY_MINUTES)
@@ -380,40 +436,11 @@ def scheduler():
         try:
             config = read_json(CONFIG_PATH, {})
             state = read_json(RUN_PATH, {})
-            plan = decide(now(), config, state)
-            if plan is not None:
-                if plan["changes"]:
-                    state.update(plan["changes"])
-                # Evidence that this runner was alive right now, used to tell a
-                # genuinely missed alarm from one the machine slept through.
-                state["last_seen"] = plan["at"]
-                handled = None
-                if plan["prepare_due"]:
-                    LOG.info("Preparing content for %s", plan["marker"])
-                    handled = "prepare"
-                    if run_job("prepare", prepare_job, wait=True)[1]:
-                        state["last_prepare_ok"] = plan["marker"]
-                        state["prep_retry_at"] = None
-                        prune_episodes(Path(str(config.get("output_mp3") or ROOT)).parent,
-                                       config.get("output_mp3"))
-                elif plan["play_due"]:
-                    if plan["late_minutes"]:
-                        LOG.info("Playing for %s (late by %s min)", plan["marker"], plan["late_minutes"])
-                    else:
-                        LOG.info("Playing for %s", plan["marker"])
-                    handled = "play"
-                    if run_job("play", play_job, wait=True)[1]:
-                        state["last_play_ok"] = plan["marker"]
-                elif plan["action"] == "skip":
-                    LOG.error("Gave up on %s: no successful playback within %s minutes",
-                              plan["marker"], CATCH_UP_MINUTES)
-                state["plan"] = {k: v for k, v in plan.items() if k != "changes"}
-                if handled:
-                    state["plan"]["handled"] = handled
-                write_json(RUN_PATH, state)
+            run_scheduler_tick(config, state)
         except Exception:
             LOG.exception("Scheduler tick failed")
         time.sleep(SCHEDULER_TICK_SECONDS)
+
 
 
 class Handler(BaseHTTPRequestHandler):
