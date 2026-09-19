@@ -30,6 +30,10 @@ public static class AlarmRunner
             {
                 await FireAsync(alarm, data.Settings);
             }
+            else if (mode == "--preview-now")
+            {
+                await PreviewAsync(alarm, data.Settings);
+            }
             else
             {
                 if (!CalendarRules.ShouldRing(alarm, targetDate)) return 0;
@@ -66,13 +70,13 @@ public static class AlarmRunner
 
     public static async Task FireAsync(AlarmModel alarm, AppSettings settings)
     {
-        var file = alarm.Sound == SoundKind.LocalFile ? alarm.LocalFile : alarm.PreparedFile;
+        var file = ResolvePlayableFile(alarm, settings);
         if (!File.Exists(file))
         {
             await PrepareAsync(alarm, settings);
             var current = await DataStore.LoadAsync();
             alarm = current.Alarms.First(a => a.Id == alarm.Id);
-            file = alarm.Sound == SoundKind.LocalFile ? alarm.LocalFile : alarm.PreparedFile;
+            file = ResolvePlayableFile(alarm, settings);
         }
         if (!File.Exists(file)) throw new FileNotFoundException("没有可播放的铃声文件");
         try
@@ -86,5 +90,34 @@ public static class AlarmRunner
             await DataStore.UpdateAlarmAsync(alarm.Id, a => { a.LastFiredAt = DateTimeOffset.Now; a.LastResult = "播放失败，已重试 4 次"; });
             throw;
         }
+    }
+
+    public static async Task PreviewAsync(AlarmModel alarm, AppSettings settings)
+    {
+        var file = ResolvePlayableFile(alarm, settings);
+        if (!File.Exists(file))
+            throw new InvalidOperationException("当前没有可试听的缓存。请先点击“立即更新”；试听不会临时访问 B 站，以免 412 导致失败。");
+        if (!string.Equals(file, alarm.PreparedFile, StringComparison.OrdinalIgnoreCase) && alarm.Sound != SoundKind.LocalFile)
+            await DataStore.UpdateAlarmAsync(alarm.Id, a => a.PreparedFile = file);
+        await XiaoMusicService.PlayWithRetryAsync(settings, Path.GetFileNameWithoutExtension(file), alarm.Volume);
+        await DataStore.UpdateAlarmAsync(alarm.Id, a => { a.LastFiredAt = DateTimeOffset.Now; a.LastResult = "试听成功"; });
+        Log.Info($"{alarm.Name} 试听成功：{file}");
+    }
+
+    private static string ResolvePlayableFile(AlarmModel alarm, AppSettings settings)
+    {
+        if (alarm.Sound == SoundKind.LocalFile) return alarm.LocalFile;
+        if (File.Exists(alarm.PreparedFile)) return alarm.PreparedFile;
+        var mediaRoot = string.IsNullOrWhiteSpace(settings.MediaDirectory) ? AppPaths.Media : settings.MediaDirectory;
+        if (!Directory.Exists(mediaRoot)) return alarm.PreparedFile;
+        var oldName = Path.GetFileName(alarm.PreparedFile);
+        var marker = oldName.LastIndexOf("-BV", StringComparison.OrdinalIgnoreCase);
+        if (marker >= 0)
+        {
+            var suffix = oldName[(marker + 1)..];
+            var sameVideo = Directory.GetFiles(mediaRoot, $"*-{suffix}").OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
+            if (sameVideo is not null) return sameVideo;
+        }
+        return Directory.GetFiles(mediaRoot, $"小爱闹钟-{alarm.Id[..8]}-*.mp3").OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault() ?? alarm.PreparedFile;
     }
 }

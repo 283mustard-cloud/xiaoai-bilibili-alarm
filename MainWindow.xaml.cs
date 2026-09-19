@@ -132,9 +132,10 @@ public partial class MainWindow : Window
             Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait;
             var alarm = ReadEditor();
             var index = _data.Alarms.FindIndex(a => a.Id == alarm.Id); if (index >= 0) _data.Alarms[index] = alarm; else _data.Alarms.Add(alarm);
+            _editingId = alarm.Id;
             await DataStore.SaveAsync(_data);
             var latest = (await DataStore.LoadAsync()).Alarms.First(a => a.Id == alarm.Id);
-            await AlarmRunner.FireAsync(latest, _data.Settings);
+            await AlarmRunner.PreviewAsync(latest, _data.Settings);
             MessageBox.Show("已将当前铃声推送到小爱音箱。", "试听成功", MessageBoxButton.OK, MessageBoxImage.Information);
         }
         catch (Exception ex) { MessageBox.Show(ex.Message, "试听失败", MessageBoxButton.OK, MessageBoxImage.Error); }
@@ -148,6 +149,7 @@ public partial class MainWindow : Window
             Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait;
             var alarm = ReadEditor();
             var index = _data.Alarms.FindIndex(a => a.Id == alarm.Id); if (index >= 0) _data.Alarms[index] = alarm; else _data.Alarms.Add(alarm);
+            _editingId = alarm.Id;
             await DataStore.SaveAsync(_data);
             await AlarmRunner.PrepareAsync(alarm, _data.Settings);
             var latest = (await DataStore.LoadAsync()).Alarms.First(a => a.Id == alarm.Id);

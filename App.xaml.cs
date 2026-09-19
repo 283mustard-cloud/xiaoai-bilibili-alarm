@@ -10,7 +10,7 @@ public partial class App : Application
         base.OnStartup(e);
         AppPaths.Ensure();
         Log.Initialize();
-        if (e.Args.Length >= 2 && (e.Args[0] == "--prepare" || e.Args[0] == "--prepare-now" || e.Args[0] == "--fire" || e.Args[0] == "--fire-now"))
+        if (e.Args.Length >= 2 && (e.Args[0] == "--prepare" || e.Args[0] == "--prepare-now" || e.Args[0] == "--fire" || e.Args[0] == "--fire-now" || e.Args[0] == "--preview-now"))
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             var exit = await AlarmRunner.RunAsync(e.Args[0], e.Args[1]);
