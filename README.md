@@ -26,7 +26,7 @@
 ## 安装
 
 ```powershell
-git clone https://github.com/YOUR_NAME/xiaoai-bilibili-alarm.git
+git clone https://github.com/283mustard-cloud/xiaoai-bilibili-alarm.git
 cd xiaoai-bilibili-alarm
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
