@@ -1,187 +1,63 @@
-# 小爱 B 站闹钟
+# 小爱闹钟
 
-用一台常开的 Windows 电脑，让小爱音箱在指定日期和时间播放 B 站账号的最新投稿、指定视频或本地音频。无需把音箱切换成蓝牙音箱。
+面向 Windows 11 的原生桌面闹钟，将 B 站 UP 主最新投稿、指定视频或本地音频推送到小爱音箱播放。
 
-项目提供本地网页控制台，可调整：
+## 功能
 
-- 播放时间
-- 中国法定工作日、每天、指定星期或指定日期
-- 额外播放和跳过日期
-- B 站账号最新投稿、指定视频或本地音频
-- 立即更新、试听和停止播放
+- 一级页面管理多个闹钟和独立开关
+- 二级页面设置名称、时间、重复方式、铃声和贪睡时间
+- 支持中国法定工作日、每天和指定星期
+- 每个闹钟注册独立的 Windows 唤醒任务
+- 到点播放和提前更新均由隐藏的同一个 EXE 执行，不弹控制台
+- 支持 B 站 UP 主最新投稿、指定视频和本地音频
+- 更新失败时保留上一次可用铃声，避免下载故障导致闹钟无声
+- XiaoMusic 不在线时自动以隐藏方式启动，并重试小爱播放推送
+- 电脑错过闹钟 15 分钟以上时不再突然补播
 
-## 工作方式
+## 架构
 
-1. `yt-dlp` 获取 B 站视频并转成 MP3。
-2. XiaoMusic 把电脑上的音频地址发送给小爱音箱播放。
-3. 本地控制台在 `http://127.0.0.1:58100` 运行，并负责调度。
-4. 调度规则集中在 `schedule_rules.py`，`alarm_app.decide()` 是纯函数形式的调度策略，可离线回归测试。
+应用使用 .NET 8 WPF，不依赖常驻的 Python 调度器。
 
-调度细节：
+每个启用的闹钟对应两个 Windows 计划任务：
 
-- 网络内容在播放前 30 分钟开始准备；准备失败每 10 分钟重试一次，直到播放时间。
-- 到点播放；若音箱或小米服务暂时不可用，1 分钟内自动重试。
-- **错过也能补播**：机器晚唤醒或程序晚启动时，播放时间后 15 分钟内仍会补播（日志会记录迟到分钟数）。
-- 同一期内容只准备一次、同一次闹钟只播放一次；失败会记录到 `logs/alarm.log`。
-- 每个 BV 单独存一个 MP3，只保留最近 3 期，自动清理更早的文件。
+1. `--prepare <id>`：在播放前准备网络音频。
+2. `--fire <id>`：在设定时间唤醒电脑并推送到小爱音箱。
 
-## 环境要求
+任务包含 `WakeToRun=true`、`StartWhenAvailable=true` 和 `Hidden=true`。主窗口关闭后任务仍能运行。
 
-- Windows 10/11
-- Python 3.11 或更新版本
-- 常开且与音箱位于同一局域网的电脑
-- 已加入米家的兼容小爱音箱
+XiaoMusic 仍负责与小爱音箱通信。B 站内容由官方发布的 `yt-dlp.exe` 获取。
 
-## 安装
+## 构建
+
+安装 [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)，然后运行：
 
 ```powershell
-git clone https://github.com/283mustard-cloud/xiaoai-bilibili-alarm.git
-cd xiaoai-bilibili-alarm
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-Copy-Item config.example.json config.json
-Copy-Item xiaomusic-config.example.json xiaomusic-config.json
+.\build.ps1
 ```
 
-编辑 `xiaomusic-config.json`，填写小米账号、本机音乐目录和下载目录。首次启动 XiaoMusic：
+输出位于 `publish/`。首次打开后，在“设置”中填写：
 
-```powershell
-python launch_xiaomusic.py
-```
+- XiaoMusic 地址
+- 小爱音箱设备 ID
+- XiaoMusic 启动脚本与 Python 路径
+- XiaoMusic 音乐目录
+- `yt-dlp.exe` 和 `ffmpeg.exe` 路径
 
-打开 `http://127.0.0.1:58090/static/default/setting.html`，完成登录并选中音箱。然后启动闹钟控制台：
-
-```powershell
-python alarm_app.py
-```
-
-打开 `http://127.0.0.1:58100`，填写音箱设备 ID 和播放来源，保存后先执行“现在更新内容”和“试听当前内容”。
-
-确认播放正常后，以管理员身份运行：
-
-```powershell
-.\migrate_to_app.ps1
-```
-
-它会注册一个登录时自动启动的 Windows 计划任务（优先使用 `.venv` 里的解释器）。网页中的调度设置会立即生效。
-
-注意这个任务**只有登录触发器，没有定时触发器**，因为播放时间保存在 `alarm_app.py` 的配置里而不是计划任务里。因此：
-
-- 电脑需要保持登录、保持运行；
-- **电脑如果在播放时间前进入睡眠，闹钟不会唤醒它**（`WakeToRun` 对没有定时触发器的任务没有意义，所以脚本已不再设置它）；
-- 需要唤醒的话，请另建一个带「每日触发 + 唤醒计算机」的独立任务来唤醒机器，由本程序负责播放。
-
-如需让音箱访问电脑上的 58090 端口，以管理员身份运行：
-
-```powershell
-.\allow_lan.ps1
-```
-
-### 端口看护（可选）
-
-应用任务本身无法从“被外部杀掉”中恢复：它的重启设置只对任务计划程序观察到的失败生效。
-如果需要电脑长时间无人值守，以管理员身份运行：
-
-```powershell
-.\register_watchdog.ps1
-```
-
-它注册一个每 5 分钟执行一次的 `XiaoAiBiliAlarm-Watchdog` 任务，检查 58100 是否在监听；
-若没有监听就重启 `XiaoAiBiliAlarm-App`。平时不写日志（每天一条心跳），
-只有异常和恢复动作会记到 `logs/watchdog.log`。
-
-看护任务同样以当前用户身份运行，因此**只在用户已登录时有效**；鼠标/键盘无人操作不受影响。
-
-## 托盘程序与 exe（桌面版）
-
-除了网页控制台，项目还提供一个**托盘 + 本机窗口**的程序 `alarm_gui.py`，打包成单个 exe：
-托盘图标直接用颜色表示状态，点开窗口能看到“现在能不能响”的自检结果。
-
-```powershell
-python alarm_gui.py              # 托盘 + 窗口 + 调度 + 网页控制台
-python alarm_gui.py --no-window  # 只显示托盘
-python alarm_gui.py --self-check # 在控制台打印自检结果后退出
-```
-
-托盘图标颜色：**绿**=正常运行（悬停显示距下次播放时间）、**琥珀**=正在更新或播放、
-**灰**=闹钟已关闭、**红**=没有可播放音频或上次播放失败。右键菜单可以试听、更新内容、
-停止播放、启用/关闭闹钟、打开网页控制台与日志、退出。
-
-窗口里的自检会逐项告诉你现在能不能响：
-
-- 配置是否有效
-- 调度器心跳（判断后台线程是否还活着）
-- 待播放的音频文件是否存在
-- 打包版下载 B 站音频所需的 Python 是否可用
-- XiaoMusic 服务是否可连接、音箱是否在线
-
-### 构建 exe
-
-```powershell
-python -m pip install pyinstaller pystray pillow
-powershell -ExecutionPolicy Bypass -File .\build_exe.ps1            # 无控制台窗口
-powershell -ExecutionPolicy Bypass -File .\build_exe.ps1 -Console   # 带控制台，便于排查
-```
-
-产物为单文件 `小爱B站闹钟.exe`（约 19.5 MB），**把它放在 `config.json` 同目录**再运行：
-exe 以自身所在目录作为项目目录。exe 内已包含 Python、tkinter、Pillow、pystray 与内嵌的网页控制台。
-
-两点必须知道：
-
-- 从 B 站下载音频仍然依赖**已安装的 Python**（`yt-dlp` 在自己的进程里运行，便于单独升级，
-  也避免给 exe 增加约 100 MB）。exe 的自检会检查这一项，缺失时报“下载工具”失败。
-- 单文件 exe 由 PyInstaller 的**引导进程 + 实际工作进程**组成：只结束父进程时工作进程仍在运行，
-  闹钟不会被停掉。要彻底停止请结束整个进程树，或使用托盘菜单的“退出”。
-
-### 让开机自启使用 exe
-
-把启动任务指向 exe 即可（`XiaoAiBiliAlarm-App` 改为执行 `小爱B站闹钟.exe`），
-或继续用 `python alarm_app.py`——两种方式跑的是同一套调度与看护逻辑，选一种即可，
-**不要同时运行两个，否则会有两个调度器抢同一份 runstate**。
+配置保存在 `%LOCALAPPDATA%\XiaoAiAlarm\alarms.json`，不会写入程序目录。
 
 ## 测试
 
-调度逻辑和托盘诊断都可以完全离线验证，不需要网络、音箱或真实配置：
-
 ```powershell
-python tests\test_alarm_schedule.py   # 调度规则、补播重试、状态写入竞态、内嵌看板一致性
-python tests\test_alarm_gui.py        # 托盘状态判定与自检告警
+dotnet run --project Tests\XiaoAiAlarm.Tests.csproj -c Release
 ```
 
-覆盖凌晨闹钟的跨日准备窗口、晚唤醒补播、准备与播放重试、调休工作日、
-法定假日、日历数据跨年回退、任务结果不被调度器覆盖、托盘不会误报“一切正常”等情况。
+测试覆盖法定节假日、调休工作日、指定星期、停用闹钟和凌晨跨日准备。
 
-控制台默认监听 58100。想在不打扰已运行实例（也不会让音箱出声）的情况下
-单独起一个实例验证界面，可以换端口：
+## 当前限制
 
-```powershell
-$env:XIAOAI_ALARM_PORT=58101; python alarm_app.py
-```
-
-## 配置说明
-
-`config.json` 里的可选项：
-
-- `play_time`：播放时间，北京时间 `HH:MM`。
-- `schedule_mode`：`workdays` / `daily` / `weekdays` / `dates`。
-- `include_dates` / `exclude_dates`：额外播放和跳过日期，跳过优先。
-- `prepare_lead_minutes`：提前准备内容的分钟数，默认 30。
-- `source_type`：`latest` / `video` / `local`。
-
-## 配置和隐私
-
-`config.json`、`xiaomusic-config.json`、`conf/`、音频、日志及缓存均已加入 `.gitignore`。请勿提交小米账号、密码、Cookie 或设备 ID。
-
-控制台只监听本机回环地址。XiaoMusic 的媒体服务需对局域网开放，防火墙规则仅允许本地子网访问。
-
-## 已知限制
-
-- B 站页面或接口变化时，可能需要更新 `yt-dlp`。
-- 中国法定工作日依赖 `chinesecalendar` 的节假日数据。数据只覆盖到已发布年份（例如 2027 年安排公布前只到 2026 年）；超出范围时会记录警告并退化为“周一至周五”，不再中断调度，但调休判断会不准确，应及时升级依赖。
-- 电脑休眠、断网或小米服务不可用时无法按时播放；15 分钟补偿窗口之外不会再补播。
-- 计划任务随用户登录启动且没有定时触发器，电脑需保持登录并且不能睡眠到错过播放时间；睡眠唤醒需要另建带唤醒设置的定时任务。
-- 是否兼容取决于音箱型号和 XiaoMusic 支持情况。
+- 法定工作日数据需要随国务院年度放假安排更新；仓库当前内置 2026 年数据，其他年份退化为周一至周五。
+- XiaoMusic 的账号与设备兼容范围由 XiaoMusic 项目决定。
+- 电脑必须支持并启用 Windows 唤醒定时器；完全关机时无法自动开机。
 
 ## 许可证
 
