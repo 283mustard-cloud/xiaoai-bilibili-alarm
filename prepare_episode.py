@@ -12,9 +12,43 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(os.environ.get("XIAOAI_ALARM_ROOT") or Path(__file__).resolve().parent)
 sys.path.insert(0, str(ROOT / "vendor"))
 TZ = timezone(timedelta(hours=8))
+
+
+def project_root():
+    """Where config.json / vendor live (see alarm_app.project_dir)."""
+    return ROOT
+
+
+def python_exe():
+    """A real Python interpreter, which a frozen exe is not."""
+    candidate = os.environ.get("XIAOAI_ALARM_PYTHON")
+    if candidate and Path(candidate).is_file():
+        return candidate
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+    import shutil
+    for name in ("python.exe", "python3.exe", "python"):
+        found = shutil.which(name)
+        if found:
+            return found
+    raise RuntimeError(
+        "本程序是打包版，需要已安装的 Python 才能下载 B 站音频；"
+        "请安装 Python 并确保 python 在 PATH 中，或在 config.json 里设置 python_exe"
+    )
+
+
+def child_env():
+    root = project_root()
+    env = os.environ.copy()
+    vendor = root / "vendor"
+    if vendor.is_dir():
+        env["PYTHONPATH"] = str(vendor) + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["XIAOAI_ALARM_ROOT"] = str(root)
+    return env
 
 
 def write_json(path, value):
@@ -25,12 +59,9 @@ def write_json(path, value):
 
 
 def ytdlp(*args):
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(ROOT / "vendor") + os.pathsep + env.get("PYTHONPATH", "")
-    env["PYTHONIOENCODING"] = "utf-8"
     result = subprocess.run(
-        [sys.executable, "-m", "yt_dlp", *args], capture_output=True, text=True,
-        encoding="utf-8", errors="replace", timeout=180, env=env,
+        [python_exe(), "-m", "yt_dlp", *args], capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=180, env=child_env(),
     )
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or "yt-dlp failed")
@@ -39,7 +70,8 @@ def ytdlp(*args):
 
 def main(config=None):
     log = logging.getLogger("alarm.prepare")
-    config = config or json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+    root = project_root()
+    config = config or json.loads((root / "config.json").read_text(encoding="utf-8"))
     source_type = config.get("source_type", "latest")
     if source_type == "local":
         target = Path(str(config.get("output_mp3") or ""))
@@ -50,9 +82,9 @@ def main(config=None):
     if not source:
         raise RuntimeError(f"Missing address for source_type={source_type}")
     pattern = re.compile(config.get("title_pattern") or ".*", re.IGNORECASE)
-    music_dir = Path(str(config.get("output_mp3") or (ROOT / "music" / "alarm.mp3"))).expanduser().resolve().parent
+    music_dir = Path(str(config.get("output_mp3") or (root / "music" / "alarm.mp3"))).expanduser().resolve().parent
     music_dir.mkdir(parents=True, exist_ok=True)
-    state_path = ROOT / "state.json"
+    state_path = root / "state.json"
     started_at = time.monotonic()
 
     if source_type == "latest":
@@ -98,15 +130,12 @@ def main(config=None):
         temporary = target.with_name(target.stem + ".new.mp3")
         temporary.unlink(missing_ok=True)
         try:
-            env = os.environ.copy()
-            env["PYTHONPATH"] = str(ROOT / "vendor") + os.pathsep + env.get("PYTHONPATH", "")
-            env["PYTHONIOENCODING"] = "utf-8"
             import imageio_ffmpeg
             subprocess.run(
-                [sys.executable, "-m", "yt_dlp", "--no-playlist", "-x", "--audio-format", "mp3",
+                [python_exe(), "-m", "yt_dlp", "--no-playlist", "-x", "--audio-format", "mp3",
                  "--audio-quality", "5", "--ffmpeg-location", imageio_ffmpeg.get_ffmpeg_exe(),
                  "-o", str(temporary), video_url],
-                check=True, timeout=1800, env=env,
+                check=True, timeout=1800, env=child_env(),
             )
             if not temporary.exists() or temporary.stat().st_size < 100_000:
                 raise RuntimeError("Audio preparation produced no usable MP3")
@@ -115,7 +144,7 @@ def main(config=None):
             temporary.unlink(missing_ok=True)
 
     # Each episode gets its own filename; the speaker may keep the old file open.
-    config_path = ROOT / "config.json"
+    config_path = root / "config.json"
     latest_config = json.loads(config_path.read_text(encoding="utf-8"))
     active_source = latest_config.get("source_url") if source_type == "latest" else latest_config.get("video_url")
     if latest_config.get("source_type", "latest") != source_type or active_source != source:

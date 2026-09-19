@@ -93,16 +93,64 @@ python alarm_app.py
 
 看护任务同样以当前用户身份运行，因此**只在用户已登录时有效**；鼠标/键盘无人操作不受影响。
 
-## 测试
+## 托盘程序与 exe（桌面版）
 
-调度逻辑可以完全离线验证，不需要网络、音箱或真实配置：
+除了网页控制台，项目还提供一个**托盘 + 本机窗口**的程序 `alarm_gui.py`，打包成单个 exe：
+托盘图标直接用颜色表示状态，点开窗口能看到“现在能不能响”的自检结果。
 
 ```powershell
-python tests\test_alarm_schedule.py
+python alarm_gui.py              # 托盘 + 窗口 + 调度 + 网页控制台
+python alarm_gui.py --no-window  # 只显示托盘
+python alarm_gui.py --self-check # 在控制台打印自检结果后退出
+```
+
+托盘图标颜色：**绿**=正常运行（悬停显示距下次播放时间）、**琥珀**=正在更新或播放、
+**灰**=闹钟已关闭、**红**=没有可播放音频或上次播放失败。右键菜单可以试听、更新内容、
+停止播放、启用/关闭闹钟、打开网页控制台与日志、退出。
+
+窗口里的自检会逐项告诉你现在能不能响：
+
+- 配置是否有效
+- 调度器心跳（判断后台线程是否还活着）
+- 待播放的音频文件是否存在
+- 打包版下载 B 站音频所需的 Python 是否可用
+- XiaoMusic 服务是否可连接、音箱是否在线
+
+### 构建 exe
+
+```powershell
+python -m pip install pyinstaller pystray pillow
+powershell -ExecutionPolicy Bypass -File .\build_exe.ps1            # 无控制台窗口
+powershell -ExecutionPolicy Bypass -File .\build_exe.ps1 -Console   # 带控制台，便于排查
+```
+
+产物为单文件 `小爱B站闹钟.exe`（约 19.5 MB），**把它放在 `config.json` 同目录**再运行：
+exe 以自身所在目录作为项目目录。exe 内已包含 Python、tkinter、Pillow、pystray 与内嵌的网页控制台。
+
+两点必须知道：
+
+- 从 B 站下载音频仍然依赖**已安装的 Python**（`yt-dlp` 在自己的进程里运行，便于单独升级，
+  也避免给 exe 增加约 100 MB）。exe 的自检会检查这一项，缺失时报“下载工具”失败。
+- 单文件 exe 由 PyInstaller 的**引导进程 + 实际工作进程**组成：只结束父进程时工作进程仍在运行，
+  闹钟不会被停掉。要彻底停止请结束整个进程树，或使用托盘菜单的“退出”。
+
+### 让开机自启使用 exe
+
+把启动任务指向 exe 即可（`XiaoAiBiliAlarm-App` 改为执行 `小爱B站闹钟.exe`），
+或继续用 `python alarm_app.py`——两种方式跑的是同一套调度与看护逻辑，选一种即可，
+**不要同时运行两个，否则会有两个调度器抢同一份 runstate**。
+
+## 测试
+
+调度逻辑和托盘诊断都可以完全离线验证，不需要网络、音箱或真实配置：
+
+```powershell
+python tests\test_alarm_schedule.py   # 调度规则、补播重试、状态写入竞态、内嵌看板一致性
+python tests\test_alarm_gui.py        # 托盘状态判定与自检告警
 ```
 
 覆盖凌晨闹钟的跨日准备窗口、晚唤醒补播、准备与播放重试、调休工作日、
-法定假日、日历数据跨年回退、以及“任务结果不被调度器覆盖”等情况。
+法定假日、日历数据跨年回退、任务结果不被调度器覆盖、托盘不会误报“一切正常”等情况。
 
 控制台默认监听 58100。想在不打扰已运行实例（也不会让音箱出声）的情况下
 单独起一个实例验证界面，可以换端口：

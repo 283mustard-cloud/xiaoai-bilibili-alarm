@@ -419,6 +419,19 @@ def test_run_job_result_survives_scheduler_write():
         app.read_json = lambda path, default: config_holder["value"] if path == app.CONFIG_PATH else default.copy()
 
 
+def test_embedded_dashboard_is_in_sync():
+    """dashboard_assets.py must match dashboard.html.
+
+    The exe serves the embedded copy, so an edit to dashboard.html that is not
+    embedded would silently ship an old console in the packaged app.
+    """
+    print("18) embedded dashboard matches dashboard.html")
+    from dashboard_assets import DASHBOARD_HTML
+    html = (ROOT / "dashboard.html").read_text(encoding="utf-8")
+    check("embedded copy is identical (ignoring surrounding blank lines)",
+          DASHBOARD_HTML.strip(), html.strip())
+
+
 def main():
     print("Alarm schedule regression tests\n")
     for test in (

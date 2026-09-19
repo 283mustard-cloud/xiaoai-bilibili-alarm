@@ -6,11 +6,12 @@ that the alarm is due.
 """
 
 import json
+import os
 import sys
 import urllib.request
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(os.environ.get("XIAOAI_ALARM_ROOT") or Path(__file__).resolve().parent)
 sys.path.insert(0, str(ROOT / "vendor"))
 sys.path.insert(0, str(ROOT))
 

@@ -6,6 +6,7 @@ ticked over simulated times in tests; the loop and the HTTP server only carry
 out what it asks for.
 """
 
+import argparse
 import json
 import logging
 import os
@@ -22,7 +23,24 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+def project_dir():
+    """The folder holding config.json, logs and the music cache.
+
+    A normal script lives in it. A PyInstaller onefile exe does not: __file__
+    points inside the temporary extraction folder, so there the exe's own
+    location is the project root. An explicit XIAOAI_ALARM_ROOT wins, which the
+    exe sets for the child processes it spawns.
+    """
+    explicit = os.environ.get("XIAOAI_ALARM_ROOT")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+ROOT = project_dir()
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "vendor"))
 
 from schedule_rules import (  # noqa: E402  (needs the vendor path first)
@@ -38,11 +56,13 @@ from schedule_rules import (  # noqa: E402  (needs the vendor path first)
 
 from play_alarm import main as play_audio  # noqa: E402
 from prepare_episode import main as prepare_audio  # noqa: E402
+from dashboard_assets import DASHBOARD_HTML  # noqa: E402
 
 CONFIG_PATH = ROOT / "config.json"
 RUN_PATH = ROOT / "runstate.json"
 STATE_PATH = ROOT / "state.json"
 LOG_PATH = ROOT / "logs" / "alarm.log"
+TMP_DIR = ROOT / "tmp"
 
 LOCK = threading.RLock()
 BUSY = set()
@@ -339,6 +359,58 @@ def run_job(kind, job, wait=False):
     return True, False
 
 
+def status_payload():
+    """Everything the dashboard, the tray and the GUI know about the run.
+
+    Single source of truth so the tray tooltip, the native window and
+    /api/status can never disagree.
+    """
+    config = read_json(CONFIG_PATH, {})
+    state = read_json(RUN_PATH, {})
+    current = now()
+    next_play, next_prepare = next_schedule(current, config)
+    output = str(config.get("output_mp3") or "")
+    last_due = previous_alarm(current, config)
+    planned = f"{config.get('play_time')}"
+    last_marker = state.get("last_play_day")
+    state["busy"] = bool(BUSY)
+    state["episode"] = read_json(STATE_PATH, {})
+    state["audio_ready"] = bool(output) and Path(output).is_file()
+    state["auto_update"] = config.get("source_type", "latest") != "local"
+    state["catch_up_minutes"] = CATCH_UP_MINUTES
+    state["last_alarm"] = last_due.isoformat(timespec="minutes") if last_due else None
+    state["last_play_ok"] = occurred_at(state, "play", last_due, config)
+    # Missed = the most recent attempt was for a real alarm and it failed.
+    state["last_play_missed"] = bool(
+        last_due and isinstance(last_marker, str) and last_marker.endswith(f"@{planned}")
+        and state.get("last_play_ok") is not True
+    )
+    state["next_play"] = next_play.isoformat(timespec="minutes") if next_play else None
+    state["next_prepare"] = next_prepare.isoformat(timespec="minutes") if next_prepare else None
+    state["enabled"] = bool(config.get("enabled", True))
+    return state
+
+
+def set_enabled(enabled):
+    """Turn the alarm on or off from outside the dashboard."""
+    with LOCK:
+        config = read_json(CONFIG_PATH, {})
+        config["enabled"] = bool(enabled)
+        validate(config)
+        write_json(CONFIG_PATH, config)
+        return config["enabled"]
+
+
+def serve_job(kind, job, wait=False):
+    """Public wrapper so the GUI can trigger jobs like the dashboard does."""
+    return run_job(kind, job, wait)
+
+
+def http_server(port=None):
+    """Build (but do not start) the dashboard server."""
+    return ThreadingHTTPServer(("127.0.0.1", port or PORT), Handler)
+
+
 def prepare_job(config):
     """Fetch/convert the configured content. Raises when it is not usable."""
     if config.get("source_type") == "local":
@@ -459,36 +531,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/":
-            body = (ROOT / "dashboard.html").read_bytes()
+            # Prefer the embedded copy (a frozen exe ships no data files), but
+            # fall back to the file so editing dashboard.html still works.
+            body = DASHBOARD_HTML.encode("utf-8")
+            html_path = ROOT / "dashboard.html"
+            if html_path.is_file():
+                body = html_path.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
         elif self.path == "/api/status":
-            config = read_json(CONFIG_PATH, {})
-            state = read_json(RUN_PATH, {})
-            current = now()
-            next_play, next_prepare = next_schedule(current, config)
-            output = str(config.get("output_mp3") or "")
-            last_due = previous_alarm(current, config)
-            planned = f"{config.get('play_time')}"
-            last_marker = state.get("last_play_day")
-            state["busy"] = bool(BUSY)
-            state["episode"] = read_json(STATE_PATH, {})
-            state["audio_ready"] = bool(output) and Path(output).is_file()
-            state["auto_update"] = config.get("source_type", "latest") != "local"
-            state["catch_up_minutes"] = CATCH_UP_MINUTES
-            state["last_alarm"] = last_due.isoformat(timespec="minutes") if last_due else None
-            state["last_play_ok"] = occurred_at(state, "play", last_due, config)
-            # Missed = the most recent attempt was for a real alarm and it failed.
-            state["last_play_missed"] = bool(
-                last_due and isinstance(last_marker, str) and last_marker.endswith(f"@{planned}")
-                and state.get("last_play_ok") is not True
-            )
-            state["next_play"] = next_play.isoformat(timespec="minutes") if next_play else None
-            state["next_prepare"] = next_prepare.isoformat(timespec="minutes") if next_prepare else None
-            self.send_json(200, state)
+            self.send_json(200, status_payload())
         elif self.path == "/api/config":
             self.send_json(200, read_json(CONFIG_PATH, {}))
         else:
@@ -579,7 +634,38 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-if __name__ == "__main__":
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="小爱 B 站闹钟：网页控制台与调度器")
+    parser.add_argument("--port", type=int, default=PORT,
+                        help=f"控制台端口，默认 {PORT}（也可用环境变量 XIAOAI_ALARM_PORT）")
+    parser.add_argument("--no-scheduler", action="store_true",
+                        help="只启动网页控制台，不跑调度（用于排查问题）")
+    parser.add_argument("--tray", action="store_true",
+                        help="同时显示托盘图标和本机窗口（打包后的 exe 默认开启）")
+    return parser.parse_args(argv)
+
+
+def run_service(port=None, with_scheduler=True, block=True):
+    """Start the scheduler thread and the dashboard; return the HTTP server."""
+    target_port = port or PORT
+    if with_scheduler:
+        threading.Thread(target=scheduler, daemon=True).start()
+    else:
+        LOG.warning("Scheduler disabled by --no-scheduler; the alarm will not ring")
+    server = ThreadingHTTPServer(("127.0.0.1", target_port), Handler)
+    if block:
+        server.serve_forever()
+    else:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def main(argv=None):
+    args = parse_args(argv)
     setup_logging()
-    threading.Thread(target=scheduler, daemon=True).start()
-    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    run_service(port=args.port, with_scheduler=not args.no_scheduler)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
