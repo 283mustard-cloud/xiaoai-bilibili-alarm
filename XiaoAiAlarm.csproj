@@ -8,6 +8,8 @@
     <AssemblyName>XiaoAiAlarm</AssemblyName>
     <RootNamespace>XiaoAiAlarm</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\alarm.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup><Compile Remove="Tests\**\*.cs"/><None Remove="Tests\**\*"/></ItemGroup>
+  <ItemGroup><Resource Include="Assets\alarm.ico" /></ItemGroup>
 </Project>

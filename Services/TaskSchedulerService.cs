@@ -15,6 +15,11 @@ public static class TaskSchedulerService
         var prepare = time.AddMinutes(-Math.Clamp(alarm.PrepareMinutes, 0, 720));
         await CreateAsync(alarm, "Prepare", prepare, "--prepare");
         await CreateAsync(alarm, "Fire", time, "--fire");
+        var now = DateTime.Now;
+        var fireToday = DateTime.Today.Add(time.ToTimeSpan());
+        var prepareToday = DateTime.Today.Add(prepare.ToTimeSpan());
+        if (fireToday > now && (prepare > time || prepareToday <= now))
+            await RunSchtasksAsync(["/Run", "/TN", $"XiaoAiAlarm-{alarm.Id}-Prepare"]);
     }
 
     public static async Task DeleteAsync(string id)
@@ -49,7 +54,8 @@ public static class TaskSchedulerService
     {
         var name = $"XiaoAiAlarm-{alarm.Id}-{suffix}";
         var user = $"{Environment.UserDomainName}\\{Environment.UserName}";
-        var start = DateTime.Today.AddDays(1).Add(time.ToTimeSpan()).ToString("s");
+        var startAt = CalculateFirstRun(time, DateTime.Now);
+        var start = startAt.ToString("s");
         var exe = SecurityElement.Escape(AppPaths.Executable);
         var args = SecurityElement.Escape($"{mode} {alarm.Id}");
         var author = SecurityElement.Escape(user);
@@ -67,6 +73,14 @@ public static class TaskSchedulerService
         await File.WriteAllTextAsync(file, xml, Encoding.Unicode);
         try { await RunSchtasksAsync(["/Create", "/TN", name, "/XML", file, "/F"]); }
         finally { try { File.Delete(file); } catch { } }
+    }
+
+    public static DateTime CalculateFirstRun(TimeOnly time, DateTime now)
+    {
+        var startAt = now.Date.Add(time.ToTimeSpan());
+        if (startAt <= now)
+            startAt = startAt.AddMinutes(1) > now ? now.AddSeconds(5) : startAt.AddDays(1);
+        return startAt;
     }
 
     private static async Task RunSchtasksAsync(IEnumerable<string> args, bool ignoreFailure = false)
