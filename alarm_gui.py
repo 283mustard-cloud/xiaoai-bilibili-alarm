@@ -191,6 +191,13 @@ def self_check(config=None):
 # tray icon
 # --------------------------------------------------------------------------- #
 def make_icon(colour):
+    """Build the tray icon.
+
+    Must return a PIL Image: pystray calls image.save() when it hands the icon
+    to the Windows shell, so passing a file path raises
+    AttributeError: 'str' object has no attribute 'save' and the tray icon is
+    never created (which left the app with no icon and a frozen window).
+    """
     from PIL import Image, ImageDraw
     image = Image.new("RGBA", (ICON_SIZE, ICON_SIZE), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
@@ -199,10 +206,7 @@ def make_icon(colour):
     centre = ICON_SIZE // 2
     draw.line((centre, centre, centre, centre - 16), fill="white", width=4)
     draw.line((centre, centre, centre + 12, centre + 6), fill="white", width=4)
-    path = Path(core.TMP_DIR) / f"tray-{colour.strip('#')}.ico"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    image.save(path, format="ICO")
-    return path
+    return image
 
 
 class TrayAlarm:
@@ -250,7 +254,7 @@ class TrayAlarm:
     def icon_for(self, colour):
         if colour not in self.icon_cache:
             self.icon_cache[colour] = make_icon(colour)
-        return str(self.icon_cache[colour])
+        return self.icon_cache[colour]
 
     def menu(self):
         import pystray
@@ -502,6 +506,76 @@ class AlarmWindow:
         self.check_running = False
 
 
+def gui_selftest():
+    """Build the tray icon and the window for real, inside this process.
+
+    This is the check that the first packaged build needed and did not have: a
+    frozen app can start, serve HTTP and still be unusable because the tray
+    icon or the window failed to construct. Run with --selftest-gui.
+    """
+    failures = []
+
+    def report(label, ok, detail=""):
+        print(f"{'PASS' if ok else 'FAIL'}  {label}{(': ' + detail) if detail else ''}")
+        if not ok:
+            failures.append(label)
+
+    icon = make_icon(GREEN)
+    report("tray icon is a PIL Image", hasattr(icon, "save"),
+           type(icon).__name__)
+    import io
+    stream = io.BytesIO()
+    icon.save(stream, format="ICO")
+    report("tray icon serializes as ICO", stream.tell() > 0, f"{stream.tell()} bytes")
+
+    app = TrayAlarm(port=0, with_scheduler=False)
+    menu = app.menu()
+    report("tray menu builds", len(list(menu)) > 0, f"{len(list(menu))} items")
+
+    try:
+        import pystray
+        tray = pystray.Icon(APP_TITLE, icon=icon, title=APP_TITLE, menu=menu)
+        report("pystray accepts the icon", tray is not None)
+    except Exception as exc:  # noqa: BLE001
+        report("pystray accepts the icon", False, repr(exc))
+
+    try:
+        snapshot = app.snapshot()
+        colour, headline, detail = app.health(snapshot)
+        report("status snapshot readable", bool(headline), headline)
+    except Exception as exc:  # noqa: BLE001
+        report("status snapshot readable", False, repr(exc))
+
+    try:
+        checks = self_check()
+        report("self-check runs", len(checks) > 0, f"{len(checks)} rows")
+        for ok, label, detail in checks:
+            print(f"      {'OK  ' if ok else ('WARN' if ok is None else 'FAIL')}  {label}: {detail}")
+    except Exception as exc:  # noqa: BLE001
+        report("self-check runs", False, repr(exc))
+
+    window_ok = True
+    try:
+        window = AlarmWindow(app)
+        window.root.withdraw()
+        window.tick()
+        window.root.update()
+        window._show_checks([(True, "自检", "ok")])
+        window.root.update()
+        window.root.destroy()
+    except Exception:  # noqa: BLE001
+        window_ok = False
+        traceback.print_exc()
+    report("window builds and renders a frame", window_ok)
+
+    print()
+    if failures:
+        print(f"{len(failures)} GUI check(s) failed: {failures}")
+        return 1
+    print("GUI self-test passed.")
+    return 0
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="小爱 B 站闹钟（托盘 + 窗口）")
     parser.add_argument("--port", type=int, default=core.PORT)
@@ -510,12 +584,16 @@ def parse_args(argv=None):
     parser.add_argument("--no-window", action="store_true", help="只显示托盘，不弹出窗口")
     parser.add_argument("--self-check", action="store_true",
                         help="在控制台打印自检结果后退出")
+    parser.add_argument("--selftest-gui", action="store_true",
+                        help="实际构建托盘图标与窗口后退出（验证打包是否可用）")
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
     core.setup_logging()
+    if args.selftest_gui:
+        return gui_selftest()
     if args.self_check:
         labels = {True: "OK  ", False: "FAIL", None: "WARN"}
         for ok, label, detail in self_check():

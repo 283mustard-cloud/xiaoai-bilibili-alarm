@@ -199,13 +199,107 @@ def test_tail_lines():
         check("returns the requested tail", lines, ["line 25", "line 26", "line 27", "line 28", "line 29"])
 
 
+def test_window_and_tray_actually_build():
+    """Build the real tray icon and the real window.
+
+    The first packaged build passed my smoke test (port open, HTTP 200) while
+    the tray icon silently failed: pystray needs a PIL Image, and a file path
+    raised AttributeError inside pystray's setup thread, leaving no icon and a
+    frozen window. This test exercises exactly those code paths.
+    """
+    print("7) tray icon and window build for real")
+
+    # 1. the icon must be a PIL object pystray can serialize to the shell
+    from PIL import Image, ImageDraw
+    icon = gui.make_icon(gui.GREEN)
+    check("make_icon returns a PIL Image", isinstance(icon, Image.Image), True)
+    check("icon has the expected size", icon.size, (gui.ICON_SIZE, gui.ICON_SIZE))
+
+    stream = None
+    drawn = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    try:
+        for method in ("save", "__enter__", "__exit__"):
+            check(f"icon supports {method}()", hasattr(icon, method), True)
+    except Exception as exc:  # noqa: BLE001
+        check("icon attribute probe", repr(exc), "no exception")
+    try:
+        import io
+        stream = io.BytesIO()
+        icon.save(stream, format="ICO")
+        check("icon serializes as ICO", stream.tell() > 0, True)
+    except Exception as exc:  # noqa: BLE001
+        check("icon serializes as ICO", repr(exc), "no exception")
+
+    # 2. the tray menu must build from a real snapshot
+    with tempfile.TemporaryDirectory() as tmp:
+        config = with_fake_project(tmp, base_config(tmp))
+        write_runstate(tmp)
+        app = gui.TrayAlarm(port=58199, with_scheduler=False)
+        app.icon = FakeIcon()                      # capture notify() safely
+        try:
+            menu = app.menu()
+            check("tray menu builds", menu is not None, True)
+            check("tray menu has items", len(list(menu)) >= 8, True)
+        except Exception as exc:  # noqa: BLE001
+            check("tray menu builds", repr(exc), "no exception")
+
+        # 3. the window must construct, render a tick and close cleanly
+        try:
+            import tkinter
+            available = True
+        except ImportError:
+            available = False
+        if not available:
+            print("  SKIP  tkinter unavailable; window test skipped")
+            return
+        window = gui.AlarmWindow(app)
+        try:
+            window.root.withdraw()                 # never steal focus while testing
+            window.tick()                          # render one frame
+            window.root.update()
+            headline = window.headline.cget("text")
+            body = window.next_label.cget("text")
+            check("window headline is filled in", bool(headline.strip()), True)
+            check("window body shows the next alarm", "下次播放" in body, True)
+            check("window body shows the episode", "当前内容" in body, True)
+            window._show_checks([(True, "自检", "ok"), (False, "音箱", "离线")])
+            window.root.update()
+            checks_text = window.checks.get("1.0", "end")
+            check("self-check rows render", "自检：ok" in checks_text, True)
+            check("failing row renders with a cross", "✘" in checks_text, True)
+        except Exception as exc:  # noqa: BLE001
+            import traceback
+            check("window tick runs without error", traceback.format_exc(limit=2), "no exception")
+        finally:
+            try:
+                window.root.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+class FakeIcon:
+    """Stands in for pystray.Icon so tests never touch the real tray."""
+
+    def __init__(self):
+        self.icon = None
+        self.title = None
+        self.menu = None
+        self.notifications = []
+
+    def notify(self, message, title=None):
+        self.notifications.append((title, message))
+
+    def stop(self):
+        pass
+
+
 def main():
     print("Tray/GUI diagnostics tests\n")
     original = (core.CONFIG_PATH, core.RUN_PATH, core.STATE_PATH, core.LOG_PATH, core.TMP_DIR)
     try:
         for test in (test_countdown_formatting, test_stamp, test_health_states,
                      test_self_check_reports_problems, test_tcp_and_device_probe_are_safe,
-                     test_tail_lines):
+                     test_tail_lines, test_window_and_tray_actually_build):
             test()
             print()
     finally:
