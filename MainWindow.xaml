@@ -35,7 +35,7 @@
             <TextBlock x:Name="PreparedInfo" Foreground="{StaticResource SubtleBrush}" Margin="0,14,0,0" TextWrapping="Wrap"/>
           </StackPanel></Border>
         </StackPanel>
-        <Grid Grid.Row="2" Margin="0,4,0,25"><StackPanel Orientation="Horizontal"><Button x:Name="DeleteButton" Content="删除" Foreground="#C42B1C" Click="Delete_Click"/><Button Content="试听" Click="Test_Click"/><Button Content="停止音箱" Click="Stop_Click"/></StackPanel><Button Content="保存" Style="{StaticResource PrimaryButton}" HorizontalAlignment="Right" Click="Save_Click"/></Grid>
+        <Grid Grid.Row="2" Margin="0,4,0,25"><StackPanel Orientation="Horizontal"><Button x:Name="DeleteButton" Content="删除" Foreground="#C42B1C" Click="Delete_Click"/><Button Content="立即更新" Click="UpdateNow_Click"/><Button Content="试听" Click="Test_Click"/><Button Content="停止音箱" Click="Stop_Click"/></StackPanel><Button Content="保存" Style="{StaticResource PrimaryButton}" HorizontalAlignment="Right" Click="Save_Click"/></Grid>
       </Grid>
     </ScrollViewer>
 

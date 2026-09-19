@@ -125,18 +125,49 @@ public partial class MainWindow : Window
 
     private async void Test_Click(object sender, RoutedEventArgs e)
     {
+        Exception? updateError = null;
         try
         {
             Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait;
             var alarm = ReadEditor();
             var index = _data.Alarms.FindIndex(a => a.Id == alarm.Id); if (index >= 0) _data.Alarms[index] = alarm; else _data.Alarms.Add(alarm);
             await DataStore.SaveAsync(_data);
-            if (alarm.Sound != SoundKind.LocalFile) await AlarmRunner.PrepareAsync(alarm, _data.Settings);
+            if (alarm.Sound != SoundKind.LocalFile)
+            {
+                try { await AlarmRunner.PrepareAsync(alarm, _data.Settings); }
+                catch (Exception ex) { updateError = ex; }
+            }
             var latest = (await DataStore.LoadAsync()).Alarms.First(a => a.Id == alarm.Id);
-            await AlarmRunner.FireAsync(latest, _data.Settings); MessageBox.Show("已推送到小爱音箱。", "试听成功");
+            await AlarmRunner.FireAsync(latest, _data.Settings);
+            MessageBox.Show(updateError is null ? "已更新并推送到小爱音箱。" : "B 站更新暂时失败，已播放上一次成功缓存。\n\n" + FriendlyError(updateError), updateError is null ? "试听成功" : "已使用缓存", MessageBoxButton.OK, updateError is null ? MessageBoxImage.Information : MessageBoxImage.Warning);
         }
         catch (Exception ex) { MessageBox.Show(ex.Message, "试听失败", MessageBoxButton.OK, MessageBoxImage.Error); }
         finally { Mouse.OverrideCursor = null; }
+    }
+
+    private async void UpdateNow_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait;
+            var alarm = ReadEditor();
+            var index = _data.Alarms.FindIndex(a => a.Id == alarm.Id); if (index >= 0) _data.Alarms[index] = alarm; else _data.Alarms.Add(alarm);
+            await DataStore.SaveAsync(_data);
+            await AlarmRunner.PrepareAsync(alarm, _data.Settings);
+            var latest = (await DataStore.LoadAsync()).Alarms.First(a => a.Id == alarm.Id);
+            PreparedInfo.Text = $"当前铃声：{latest.PreparedTitle}\n更新时间：{latest.PreparedAt:yyyy-MM-dd HH:mm}";
+            MessageBox.Show("最新内容已准备完成。", "更新成功", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex) { MessageBox.Show(FriendlyError(ex), "更新失败，已保留原铃声", MessageBoxButton.OK, MessageBoxImage.Warning); }
+        finally { Mouse.OverrideCursor = null; }
+    }
+
+    private static string FriendlyError(Exception ex)
+    {
+        var text = ex.Message;
+        if (text.Contains("412") || text.Contains("blocked", StringComparison.OrdinalIgnoreCase))
+            return "B 站暂时限制了主页请求（412）。应用已自动重试，稍后可再次点击“立即更新”；现有铃声不会被删除。";
+        return text;
     }
 
     private async void Stop_Click(object sender, RoutedEventArgs e) { try { await XiaoMusicService.StopAsync(_data.Settings); } catch (Exception ex) { MessageBox.Show(ex.Message, "停止失败"); } }

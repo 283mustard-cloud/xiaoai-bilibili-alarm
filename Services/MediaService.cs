@@ -21,7 +21,14 @@ public static partial class MediaService
         if (alarm.Sound == SoundKind.BilibiliLatest)
         {
             var args = prefix.Concat(["--flat-playlist", "--playlist-end", "20", "--dump-single-json", source]);
-            var list = await ProcessService.RunHiddenAsync(command.File, args, timeout: TimeSpan.FromMinutes(3));
+            (int ExitCode, string Output, string Error) list = (-1, "", "");
+            for (var attempt = 1; attempt <= 4; attempt++)
+            {
+                list = await ProcessService.RunHiddenAsync(command.File, args, timeout: TimeSpan.FromMinutes(3));
+                if (list.ExitCode == 0) break;
+                Log.Error($"读取 B 站主页失败，第 {attempt} 次：{list.Error}");
+                if (attempt < 4) await Task.Delay(TimeSpan.FromSeconds(attempt * 6));
+            }
             if (list.ExitCode != 0) throw new InvalidOperationException("读取 B 站主页失败：" + list.Error);
             using var doc = JsonDocument.Parse(list.Output);
             var pattern = new Regex(string.IsNullOrWhiteSpace(alarm.TitleFilter) ? ".*" : alarm.TitleFilter, RegexOptions.IgnoreCase);
