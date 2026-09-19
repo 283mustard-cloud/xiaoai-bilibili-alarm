@@ -125,21 +125,15 @@ public partial class MainWindow : Window
 
     private async void Test_Click(object sender, RoutedEventArgs e)
     {
-        Exception? updateError = null;
         try
         {
             Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait;
             var alarm = ReadEditor();
             var index = _data.Alarms.FindIndex(a => a.Id == alarm.Id); if (index >= 0) _data.Alarms[index] = alarm; else _data.Alarms.Add(alarm);
             await DataStore.SaveAsync(_data);
-            if (alarm.Sound != SoundKind.LocalFile)
-            {
-                try { await AlarmRunner.PrepareAsync(alarm, _data.Settings); }
-                catch (Exception ex) { updateError = ex; }
-            }
             var latest = (await DataStore.LoadAsync()).Alarms.First(a => a.Id == alarm.Id);
             await AlarmRunner.FireAsync(latest, _data.Settings);
-            MessageBox.Show(updateError is null ? "已更新并推送到小爱音箱。" : "B 站更新暂时失败，已播放上一次成功缓存。\n\n" + FriendlyError(updateError), updateError is null ? "试听成功" : "已使用缓存", MessageBoxButton.OK, updateError is null ? MessageBoxImage.Information : MessageBoxImage.Warning);
+            MessageBox.Show("已将当前铃声推送到小爱音箱。", "试听成功", MessageBoxButton.OK, MessageBoxImage.Information);
         }
         catch (Exception ex) { MessageBox.Show(ex.Message, "试听失败", MessageBoxButton.OK, MessageBoxImage.Error); }
         finally { Mouse.OverrideCursor = null; }
