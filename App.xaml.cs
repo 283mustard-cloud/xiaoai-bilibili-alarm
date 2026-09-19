@@ -14,6 +14,16 @@ public partial class App : Application
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             var exit = await AlarmRunner.RunAsync(e.Args[0], e.Args[1]);
+            if (exit == 0 && e.Args[0] == "--fire")
+            {
+                var data = await DataStore.LoadAsync();
+                var alarm = data.Alarms.FirstOrDefault(a => a.Id == e.Args[1]);
+                if (alarm?.LastFiredAt is not null && DateTimeOffset.Now - alarm.LastFiredAt < TimeSpan.FromMinutes(2) && alarm.LastResult == "播放成功")
+                {
+                    var ring = new RingWindow(alarm, data.Settings);
+                    ring.ShowDialog();
+                }
+            }
             Shutdown(exit);
             return;
         }

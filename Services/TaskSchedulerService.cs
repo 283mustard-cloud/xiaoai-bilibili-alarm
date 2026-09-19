@@ -21,6 +21,28 @@ public static class TaskSchedulerService
     {
         await RunSchtasksAsync(["/Delete", "/TN", $"XiaoAiAlarm-{id}-Prepare", "/F"], ignoreFailure: true);
         await RunSchtasksAsync(["/Delete", "/TN", $"XiaoAiAlarm-{id}-Fire", "/F"], ignoreFailure: true);
+        await RunSchtasksAsync(["/Delete", "/TN", $"XiaoAiAlarm-{id}-Snooze", "/F"], ignoreFailure: true);
+    }
+
+    public static async Task ScheduleSnoozeAsync(AlarmModel alarm)
+    {
+        var name = $"XiaoAiAlarm-{alarm.Id}-Snooze";
+        var user = $"{Environment.UserDomainName}\\{Environment.UserName}";
+        var start = DateTime.Now.AddMinutes(alarm.SnoozeMinutes).ToString("s");
+        var xml = $"""
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Author>{SecurityElement.Escape(user)}</Author><Description>小爱闹钟贪睡：{SecurityElement.Escape(alarm.Name)}</Description></RegistrationInfo>
+  <Triggers><TimeTrigger><StartBoundary>{start}</StartBoundary><Enabled>true</Enabled></TimeTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>{SecurityElement.Escape(user)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><WakeToRun>true</WakeToRun><Hidden>true</Hidden><DeleteExpiredTaskAfter>PT1H</DeleteExpiredTaskAfter><ExecutionTimeLimit>PT20M</ExecutionTimeLimit></Settings>
+  <Actions Context="Author"><Exec><Command>{SecurityElement.Escape(AppPaths.Executable)}</Command><Arguments>--fire-now {alarm.Id}</Arguments><WorkingDirectory>{SecurityElement.Escape(AppContext.BaseDirectory.TrimEnd('\\'))}</WorkingDirectory></Exec></Actions>
+</Task>
+""";
+        var file = Path.Combine(Path.GetTempPath(), $"{name}.xml");
+        await File.WriteAllTextAsync(file, xml, Encoding.Unicode);
+        try { await RunSchtasksAsync(["/Create", "/TN", name, "/XML", file, "/F"]); }
+        finally { try { File.Delete(file); } catch { } }
     }
 
     private static async Task CreateAsync(AlarmModel alarm, string suffix, TimeOnly time, string mode)
