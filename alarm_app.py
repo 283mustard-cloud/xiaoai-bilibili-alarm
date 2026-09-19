@@ -8,6 +8,7 @@ out what it asks for.
 
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -46,7 +47,10 @@ LOG_PATH = ROOT / "logs" / "alarm.log"
 LOCK = threading.RLock()
 BUSY = set()
 BUSY_EVENTS = {}
-PORT = 58100
+# The dashboard port. Overridable so a second instance can be started for
+# testing without disturbing the scheduled one.
+PORT = int(os.environ.get("XIAOAI_ALARM_PORT") or os.environ.get("PORT") or 58100)
+DASHBOARD_ORIGINS = {f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"}
 
 # How many prepared Bilibili episodes to keep on disk. Each episode is a new
 # file (the speaker may hold the old one open), so old ones have to be pruned.
@@ -492,7 +496,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         origin = self.headers.get("Origin", "")
-        if origin and origin not in (f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"):
+        if origin and origin not in DASHBOARD_ORIGINS:
             self.send_json(403, {"error": "Wrong origin"})
             return
         try:
